@@ -9,5 +9,6 @@ var/
 .idea/
 .vscode/
 .vs/
+.cache/
 **.DS_Store
 *.pyc
