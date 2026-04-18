@@ -3,6 +3,43 @@
 
 namespace hnswlib {
 
+/**
+ * @file space_ip.h
+ * @brief Inner Product (cosine similarity) distance functions.
+ *
+ * This file provides distance functions based on Inner Product.
+ * Inner Product is commonly used for cosine similarity:
+ *   - Cosine similarity = normalized inner product
+ *   - For unit vectors: inner product = cosine(angle)
+ *
+ * IMPORTANT: For nearest neighbor search to work correctly with inner product
+ * (as a distance), we return DISTANCE, not similarity:
+ *   - InnerProductDistance = 1 - InnerProduct
+ *   - This makes closer = higher inner product = smaller distance
+ *
+ * MATH:
+ *   Inner Product = sum(x_i * y_i)
+ *   Inner Product Distance = 1 - sum(x_i * y_i)
+ *   (For normalized vectors, this is proportional to angular distance)
+ *
+ * USE CASES:
+ *   - Cosine similarity search (normalize vectors first)
+ *   - Maximum inner product search (MIPS)
+ *   - Recommendation systems (dot product scoring)
+ *
+ * OPTIMIZATIONS: Same as L2 - SSE, AVX, AVX512 variants
+ */
+
+/**
+ * @brief Compute inner product of two float vectors.
+ *
+ * Simple scalar implementation - baseline.
+ *
+ * @param pVect1 Pointer to first vector (array of floats)
+ * @param pVect2 Pointer to second vector (array of floats)
+ * @param qty_ptr Pointer to dimension (size_t)
+ * @return Inner product: sum(x_i * y_i)
+ */
 static float
 InnerProduct(const void *pVect1, const void *pVect2, const void *qty_ptr) {
     size_t qty = *((size_t *) qty_ptr);
@@ -13,6 +50,22 @@ InnerProduct(const void *pVect1, const void *pVect2, const void *qty_ptr) {
     return res;
 }
 
+/**
+ * @brief Convert inner product to distance (1 - IP).
+ *
+ * For nearest neighbor search, we need distances where SMALLER is BETTER.
+ * Inner product is a similarity measure where LARGER is BETTER.
+ * So we return 1 - IP to convert to a distance.
+ *
+ * @param pVect1 Pointer to first vector
+ * @param pVect2 Pointer to second vector
+ * @param qty_ptr Pointer to dimension
+ * @return Distance: 1 - inner_product
+ *
+ * @note For unit vectors:
+ *       - IP = cos(angle)
+ *       - 1 - IP ≈ angle^2 / 2 (small angles)
+ */
 static float
 InnerProductDistance(const void *pVect1, const void *pVect2, const void *qty_ptr) {
     return 1.0f - InnerProduct(pVect1, pVect2, qty_ptr);
@@ -20,7 +73,17 @@ InnerProductDistance(const void *pVect1, const void *pVect2, const void *qty_ptr
 
 #if defined(USE_AVX)
 
-// Favor using AVX if available.
+/**
+ * @brief AVX inner product (processes 4 floats at a time x4 = 16 total).
+ *
+ * Uses AVX 256-bit registers (8 floats each, but we process 4 at a time
+ * for efficiency). Processes 16 floats per iteration.
+ *
+ * @param pVect1v Pointer to first vector
+ * @param pVect2v Pointer to second vector
+ * @param qty_ptr Pointer to dimension
+ * @return Inner product
+ */
 static float
 InnerProductSIMD4ExtAVX(const void *pVect1v, const void *pVect2v, const void *qty_ptr) {
     float PORTABLE_ALIGN32 TmpRes[8];
@@ -68,6 +131,9 @@ InnerProductSIMD4ExtAVX(const void *pVect1v, const void *pVect2v, const void *qt
     return sum;
 }
 
+/**
+ * @brief AVX inner product distance (1 - IP).
+ */
 static float
 InnerProductDistanceSIMD4ExtAVX(const void *pVect1v, const void *pVect2v, const void *qty_ptr) {
     return 1.0f - InnerProductSIMD4ExtAVX(pVect1v, pVect2v, qty_ptr);
@@ -77,6 +143,17 @@ InnerProductDistanceSIMD4ExtAVX(const void *pVect1v, const void *pVect2v, const 
 
 #if defined(USE_SSE)
 
+/**
+ * @brief SSE inner product (processes 4 floats at a time x4 = 16 total).
+ *
+ * Uses SSE 128-bit registers. Processes 16 floats per iteration.
+ * This is the fallback when AVX is not available.
+ *
+ * @param pVect1v Pointer to first vector
+ * @param pVect2v Pointer to second vector
+ * @param qty_ptr Pointer to dimension
+ * @return Inner product
+ */
 static float
 InnerProductSIMD4ExtSSE(const void *pVect1v, const void *pVect2v, const void *qty_ptr) {
     float PORTABLE_ALIGN32 TmpRes[8];
@@ -133,6 +210,9 @@ InnerProductSIMD4ExtSSE(const void *pVect1v, const void *pVect2v, const void *qt
     return sum;
 }
 
+/**
+ * @brief SSE inner product distance (1 - IP).
+ */
 static float
 InnerProductDistanceSIMD4ExtSSE(const void *pVect1v, const void *pVect2v, const void *qty_ptr) {
     return 1.0f - InnerProductSIMD4ExtSSE(pVect1v, pVect2v, qty_ptr);
@@ -143,6 +223,17 @@ InnerProductDistanceSIMD4ExtSSE(const void *pVect1v, const void *pVect2v, const 
 
 #if defined(USE_AVX512)
 
+/**
+ * @brief AVX512 inner product (processes 16 floats at once).
+ *
+ * Uses 512-bit registers, the fastest SIMD option.
+ * Uses fused multiply-add (fmadd) for better performance.
+ *
+ * @param pVect1v Pointer to first vector
+ * @param pVect2v Pointer to second vector
+ * @param qty_ptr Pointer to dimension
+ * @return Inner product
+ */
 static float
 InnerProductSIMD16ExtAVX512(const void *pVect1v, const void *pVect2v, const void *qty_ptr) {
     float PORTABLE_ALIGN64 TmpRes[16];
@@ -198,6 +289,9 @@ InnerProductSIMD16ExtAVX512(const void *pVect1v, const void *pVect2v, const void
     return sum;
 }
 
+/**
+ * @brief AVX512 inner product distance (1 - IP).
+ */
 static float
 InnerProductDistanceSIMD16ExtAVX512(const void *pVect1v, const void *pVect2v, const void *qty_ptr) {
     return 1.0f - InnerProductSIMD16ExtAVX512(pVect1v, pVect2v, qty_ptr);
@@ -207,6 +301,17 @@ InnerProductDistanceSIMD16ExtAVX512(const void *pVect1v, const void *pVect2v, co
 
 #if defined(USE_AVX)
 
+/**
+ * @brief AVX inner product (processes 16 floats at once).
+ *
+ * Uses AVX 256-bit registers (8 floats each).
+ * Processes 16 floats per iteration.
+ *
+ * @param pVect1v Pointer to first vector
+ * @param pVect2v Pointer to second vector
+ * @param qty_ptr Pointer to dimension
+ * @return Inner product
+ */
 static float
 InnerProductSIMD16ExtAVX(const void *pVect1v, const void *pVect2v, const void *qty_ptr) {
     float PORTABLE_ALIGN32 TmpRes[8];
@@ -243,6 +348,9 @@ InnerProductSIMD16ExtAVX(const void *pVect1v, const void *pVect2v, const void *q
     return sum;
 }
 
+/**
+ * @brief AVX inner product distance (1 - IP).
+ */
 static float
 InnerProductDistanceSIMD16ExtAVX(const void *pVect1v, const void *pVect2v, const void *qty_ptr) {
     return 1.0f - InnerProductSIMD16ExtAVX(pVect1v, pVect2v, qty_ptr);
@@ -252,6 +360,17 @@ InnerProductDistanceSIMD16ExtAVX(const void *pVect1v, const void *pVect2v, const
 
 #if defined(USE_SSE)
 
+/**
+ * @brief SSE inner product (processes 16 floats at once).
+ *
+ * Uses SSE 128-bit registers. Processes 16 floats per iteration.
+ * This is the fallback for 16-float operations.
+ *
+ * @param pVect1v Pointer to first vector
+ * @param pVect2v Pointer to second vector
+ * @param qty_ptr Pointer to dimension
+ * @return Inner product
+ */
 static float
 InnerProductSIMD16ExtSSE(const void *pVect1v, const void *pVect2v, const void *qty_ptr) {
     float PORTABLE_ALIGN32 TmpRes[8];
@@ -297,6 +416,9 @@ InnerProductSIMD16ExtSSE(const void *pVect1v, const void *pVect2v, const void *q
     return sum;
 }
 
+/**
+ * @brief SSE inner product distance (1 - IP).
+ */
 static float
 InnerProductDistanceSIMD16ExtSSE(const void *pVect1v, const void *pVect2v, const void *qty_ptr) {
     return 1.0f - InnerProductSIMD16ExtSSE(pVect1v, pVect2v, qty_ptr);
@@ -305,11 +427,24 @@ InnerProductDistanceSIMD16ExtSSE(const void *pVect1v, const void *pVect2v, const
 #endif
 
 #if defined(USE_SSE) || defined(USE_AVX) || defined(USE_AVX512)
+
+/**
+ * @brief Global function pointers for SIMD inner product.
+ *
+ * These are set at runtime based on CPU capabilities.
+ * 16-ext: processes 16 floats per iteration
+ * 4-ext: processes 4 floats per iteration (for smaller dims)
+ */
 static DISTFUNC<float> InnerProductSIMD16Ext = InnerProductSIMD16ExtSSE;
 static DISTFUNC<float> InnerProductSIMD4Ext = InnerProductSIMD4ExtSSE;
 static DISTFUNC<float> InnerProductDistanceSIMD16Ext = InnerProductDistanceSIMD16ExtSSE;
 static DISTFUNC<float> InnerProductDistanceSIMD4Ext = InnerProductDistanceSIMD4ExtSSE;
 
+/**
+ * @brief Inner product distance with residual handling (16-float variant).
+ *
+ * Used when dimension is not divisible by 16.
+ */
 static float
 InnerProductDistanceSIMD16ExtResiduals(const void *pVect1v, const void *pVect2v, const void *qty_ptr) {
     size_t qty = *((size_t *) qty_ptr);
@@ -323,6 +458,11 @@ InnerProductDistanceSIMD16ExtResiduals(const void *pVect1v, const void *pVect2v,
     return 1.0f - (res + res_tail);
 }
 
+/**
+ * @brief Inner product distance with residual handling (4-float variant).
+ *
+ * Used when dimension is not divisible by 16 but divisible by 4.
+ */
 static float
 InnerProductDistanceSIMD4ExtResiduals(const void *pVect1v, const void *pVect2v, const void *qty_ptr) {
     size_t qty = *((size_t *) qty_ptr);
@@ -339,12 +479,29 @@ InnerProductDistanceSIMD4ExtResiduals(const void *pVect1v, const void *pVect2v, 
 }
 #endif
 
+/**
+ * @class InnerProductSpace
+ * @brief Space class for Inner Product distance with auto-SIMD selection.
+ *
+ * Similar to L2Space, but uses inner product as the distance metric.
+ * This is used for:
+ *   - Cosine similarity search (normalize vectors first)
+ *   - Maximum Inner Product Search (MIPS)
+ *   - Recommendation systems
+ *
+ * IMPORTANT: The distance is 1 - InnerProduct.
+ * This converts "higher is better" to "lower is better".
+ */
 class InnerProductSpace : public SpaceInterface<float> {
-    DISTFUNC<float> fstdistfunc_;
-    size_t data_size_;
-    size_t dim_;
+    DISTFUNC<float> fstdistfunc_;  ///< Selected distance function
+    size_t data_size_;              ///< Size of vector in bytes
+    size_t dim_;                     ///< Dimension (number of floats)
 
  public:
+    /**
+     * @brief Create an Inner Product space.
+     * @param dim Vector dimension
+     */
     InnerProductSpace(size_t dim) {
         fstdistfunc_ = InnerProductDistance;
 #if defined(USE_AVX) || defined(USE_SSE) || defined(USE_AVX512)
@@ -382,18 +539,30 @@ class InnerProductSpace : public SpaceInterface<float> {
         data_size_ = dim * sizeof(float);
     }
 
+    /**
+     * @brief Get data size in bytes.
+     */
     size_t get_data_size() {
         return data_size_;
     }
 
+    /**
+     * @brief Get distance function.
+     */
     DISTFUNC<float> get_dist_func() {
         return fstdistfunc_;
     }
 
+    /**
+     * @brief Get dimension parameter.
+     */
     void *get_dist_func_param() {
         return &dim_;
     }
 
+/**
+ * @brief Destructor.
+ */
 ~InnerProductSpace() {}
 };
 

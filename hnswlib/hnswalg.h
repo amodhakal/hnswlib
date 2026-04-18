@@ -1,5 +1,107 @@
 #pragma once
 
+/**
+ * @file hnswalg.h
+ * @brief HNSW (Hierarchical Navigable Small World) algorithm implementation.
+ *
+ * This is the main HNSW index implementation. HNSW is a graph-based
+ * approximate nearest neighbor (ANN) algorithm that achieves:
+ *   - O(log n) query time
+ *   - O(n log n) build time
+ *   - High recall (accuracy)
+ *
+ * ========================================================================
+ * HOW HNSW WORKS
+ * ========================================================================
+ *
+ * CONCEPT: Small World Networks
+ * ----------------------------------------
+ * A graph where "degrees of separation" grows logarithmatically with graph size.
+ * Think: "six degrees of Kevin Bacon" - but with log(n), not 6.
+ *
+ * HIERARCHY: Multi-layer Graphs
+ * ----------------------------------------
+ *           Layer 2:    o--------o--------o
+ *                      |        |
+ *           Layer 1:    o--o--o--o--o--o
+ *                      |  |  |
+ *           Layer 0:    o--o--o--o--o--o--o--o--o--o
+ *
+ * Higher layers have fewer nodes but longer edges.
+ * Search starts at top layer, descends greedily.
+ *
+ * LAYER DISTRIBUTION
+ * ----------------------------------------
+ * Each element is assigned a random level l (0 to L)
+ * Probability: P(level >= l) = 1/M * e^(-l/M)
+ *
+ * Expected: ~1/M elements at each higher level
+ * For M=16: ~6% at level 1, ~0.4% at level 2, etc.
+ *
+ * MEMORY LAYOUT
+ * ----------------------------------------
+ * Each element stores:
+ *   - Level 0 links: M*2 connections
+ *   - Higher level links: M connections per level
+ *   - Vector data
+ *   - Label
+ *
+ * ========================================================================
+ * ALGORITHM PARAMETERS
+ * ========================================================================
+ *
+ * M (default 16):
+ *   - Number of bidirectional connections per node
+ *   - Higher M: better recall, more memory, slower build
+ *   - Recommended: 8-64 depending on data size
+ *
+ * efConstruction (default 200):
+ *   - Search width during index construction
+ *   - Higher: better graph quality, slower build
+ *   - Recommended: 100-400
+ *
+ * ef (default 10):
+ *   - Search width during queries
+ *   - Higher: better recall, slower query
+ *   - Set this at query time via setEf()
+ *
+ * ========================================================================
+ * BUILD PROCESS
+ * ========================================================================
+ *
+ * 1. Generate random level for new element
+ * 2. Find entry point (closest to random or first element)
+ * 3. Descend layers, finding closest at each
+ * 4. At each layer:
+ *    a. Search for efConstruction closest neighbors
+ *    b. Apply heuristic to keep M closest
+ *    c. Create bidirectional edges
+ * 5. If element's level > maxlevel, update entry point
+ *
+ * ========================================================================
+ * SEARCH PROCESS
+ * ========================================================================
+ *
+ * 1. Start at top layer entry point
+ * 2. Search layer greedily (ef-wide beam search)
+ * 3. Move to closest result's edge at next layer
+ * 4. Repeat until level 0
+ * 5. Return top k from final search
+ *
+ * ========================================================================
+ * PERFORMANCE NOTES
+ * ========================================================================
+ *
+ * Query: O(ef * log n) average
+ * Build: O(n log n)
+ * Memory: O(n * M * log n)
+ *
+ * Recall improves with:
+ *   - Higher M
+ *   - Higher efConstruction
+ *   - Higher ef (query time)
+ */
+
 #include "visited_list_pool.h"
 #include "hnswlib.h"
 #include <atomic>
@@ -11,70 +113,211 @@
 #include <memory>
 
 namespace hnswlib {
+
+/**
+ * @typedef tableint
+ * @brief Internal element index type.
+ *
+ * Internal IDs are contiguous integers 0, 1, 2...
+ * This is NOT the external label - that's stored in the element.
+ */
 typedef unsigned int tableint;
+
+/**
+ * @typedef linklistsizeint
+ * @brief Type for storing link list sizes.
+ *
+ * Stores the count of connections for each linked element.
+ */
 typedef unsigned int linklistsizeint;
 
+/**
+ * @class HierarchicalNSW
+ * @brief HNSW index implementation.
+ *
+ * Thread-safe implementation supporting concurrent search.
+ * Build is single-threaded but search is parallelizable.
+ *
+ * @tparam dist_t Distance type (typically float)
+ */
 template<typename dist_t>
 class HierarchicalNSW : public AlgorithmInterface<dist_t> {
  public:
+    /**
+     * @brief Number of locks for label-based operations.
+     *
+     * Allows concurrent operations on different labels
+     * without heavy global locking.
+     */
     static const tableint MAX_LABEL_OPERATION_LOCKS = 65536;
+
+    /**
+     * @brief Bit marking deleted elements.
+     *
+     * Stored in the link list size field.
+     */
     static const unsigned char DELETE_MARK = 0x01;
 
-    size_t max_elements_{0};
-    mutable std::atomic<size_t> cur_element_count{0};  // current number of elements
-    size_t size_data_per_element_{0};
-    size_t size_links_per_element_{0};
-    mutable std::atomic<size_t> num_deleted_{0};  // number of deleted elements
-    size_t M_{0};
-    size_t maxM_{0};
-    size_t maxM0_{0};
-    size_t ef_construction_{0};
-    size_t ef_{ 0 };
+    // ========================================================================
+    // CONFIGURATION PARAMETERS
+    // ========================================================================
 
+    size_t max_elements_{0};          ///< Maximum capacity
+    mutable std::atomic<size_t> cur_element_count{0};  ///< Current elements
+    size_t size_data_per_element_{0}; ///< Bytes per element (all levels)
+    size_t size_links_per_element_{0}; ///< Bytes per level (above 0)
+    mutable std::atomic<size_t> num_deleted_{0};        ///< Deleted count
+
+    size_t M_{0};                     ///< Connections at base level
+    size_t maxM_{0};                  ///< Max connections per level
+    size_t maxM0_{0};                 ///< Max connections at level 0
+    size_t ef_construction_{0};       ///< ef during build
+    size_t ef_{ 0 };                 ///< ef during search
+
+    // ========================================================================
+    // LEVEL DISTRIBUTION
+    // ========================================================================
+
+    /**
+     * @brief Scaling factor for level distribution.
+     *
+     * mult_ = 1 / log(M)
+     * Used in: level = floor(-log(random) * mult_)
+     */
     double mult_{0.0}, revSize_{0.0};
-    int maxlevel_{0};
+    int maxlevel_{0};                  ///< Highest occupied level
 
-    std::unique_ptr<VisitedListPool> visited_list_pool_{nullptr};
+    // ========================================================================
+    // MEMORY MANAGEMENT
+    // ========================================================================
 
-    // Locks operations with element by label value
+    std::unique_ptr<VisitedListPool> visited_list_pool_{nullptr};  ///< Visited list pool
+
+    // ========================================================================
+    // THREAD SAFETY PRIMITIVES
+    // ========================================================================
+
+    // Locks per label for label-based operations
     mutable std::vector<std::mutex> label_op_locks_;
 
-    std::mutex global;
-    std::vector<std::mutex> link_list_locks_;
+    std::mutex global;                  ///< Global lock (rarely needed)
+    std::vector<std::mutex> link_list_locks_;  ///< Per-element locks for edges
 
+    // ========================================================================
+    // ENTRY POINT
+    // ========================================================================
+
+    /**
+     * @brief Entry point for searches.
+     *
+     * This is the element closest to the origin in the normalized space.
+     * Every search starts here and descends.
+     */
     tableint enterpoint_node_{0};
 
-    size_t size_links_level0_{0};
-    size_t offsetData_{0}, offsetLevel0_{0}, label_offset_{ 0 };
+    // ========================================================================
+    // DATA LAYOUT OFFSETS
+    // ========================================================================
 
+    size_t size_links_level0_{0};     ///< Size of level 0 link list
+    size_t offsetData_{0}, offsetLevel0_{0}, label_offset_{ 0 };  ///< Memory offsets
+
+    /**
+     * @brief Storage for level 0 data.
+     *
+     * Contains: links(0) + vector + label
+     * All elements have level 0 data.
+     */
     char *data_level0_memory_{nullptr};
+
+    /**
+     * @brief Array of pointers to higher level link lists.
+     *
+     * linkLists_[i] points to element i's additional level data.
+     * NULL if element has no levels above 0.
+     */
     char **linkLists_{nullptr};
+
+    /**
+     * @brief Level for each element.
+     *
+     * element_levels_[i] = level of element i (0 = base only)
+     */
     std::vector<int> element_levels_;  // keeps level of each element
 
-    size_t data_size_{0};
+    // ========================================================================
+    // DISTANCE FUNCTION
+    // ========================================================================
 
-    DISTFUNC<dist_t> fstdistfunc_;
-    void *dist_func_param_{nullptr};
+    size_t data_size_{0};              ///< Vector size in bytes
+
+    DISTFUNC<dist_t> fstdistfunc_;    ///< Distance function
+    void *dist_func_param_{           ///< Parameter to distance function
+        nullptr};
+
+    // ========================================================================
+    // LABEL MAPPING
+    // ========================================================================
 
     mutable std::mutex label_lookup_lock;  // lock for label_lookup_
+    /**
+     * @brief Maps external labels to internal IDs.
+     *
+     * User provides external labels (any unique value).
+     * We assign internal sequential IDs.
+     */
     std::unordered_map<labeltype, tableint> label_lookup_;
 
+    // ========================================================================
+    // RANDOM NUMBER GENERATORS
+    // ========================================================================
+
+    /**
+     * @brief Generates random levels for new elements.
+     */
     std::default_random_engine level_generator_;
+
+    /**
+     * @brief Generates random update probabilities.
+     */
     std::default_random_engine update_probability_generator_;
 
-    mutable std::atomic<long> metric_distance_computations{0};
-    mutable std::atomic<long> metric_hops{0};
+    // ========================================================================
+    // METRICS
+    // ========================================================================
 
-    bool allow_replace_deleted_ = false;  // flag to replace deleted elements (marked as deleted) during insertions
+    mutable std::atomic<long> metric_distance_computations{0};  ///< Total dist computations
+    mutable std::atomic<long> metric_hops{0};             ///< Total graph hops
+
+    // ========================================================================
+    // DELETION SUPPORT
+    // ========================================================================
+
+    bool allow_replace_deleted_ = false;  // flag to replace deleted elements
 
     std::mutex deleted_elements_lock;  // lock for deleted_elements
-    std::unordered_set<tableint> deleted_elements;  // contains internal ids of deleted elements
+    /**
+     * @brief Set of deleted internal IDs (reuse candidates).
+     */
+    std::unordered_set<tableint> deleted_elements;
 
 
+    /**
+     * @brief Create empty HNSW index (requires later loadIndex).
+     * @param s The space for distance calculations
+     */
     HierarchicalNSW(SpaceInterface<dist_t> *s) {
     }
 
 
+    /**
+     * @brief Load index from file.
+     * @param s The space
+     * @param location File path
+     * @param nmslib (unused, for compatibility)
+     * @param max_elements Override capacity
+     * @param allow_replace_deleted Allow reusing deleted slots
+     */
     HierarchicalNSW(
         SpaceInterface<dist_t> *s,
         const std::string &location,
@@ -86,6 +329,20 @@ class HierarchicalNSW : public AlgorithmInterface<dist_t> {
     }
 
 
+    /**
+     * @brief Create new HNSW index.
+     *
+     * @param s The space (distance function)
+     * @param max_elements Maximum number of elements to index
+     * @param M Number of connections per node (default 16)
+     * @param ef_construction Search width during construction (default 200)
+     * @param random_seed Seed for random generators
+     * @param allow_replace_deleted Allow reusing deleted slots
+     *
+     * Example:
+     *   hnswlib::L2Space space(dim);
+     *   hnswlib::HierarchicalNSW<float> index(&space, 100000, 16, 200);
+     */
     HierarchicalNSW(
         SpaceInterface<dist_t> *s,
         size_t max_elements,
@@ -144,10 +401,16 @@ class HierarchicalNSW : public AlgorithmInterface<dist_t> {
     }
 
 
+    /**
+     * @brief Destructor - free all memory.
+     */
     ~HierarchicalNSW() {
         clear();
     }
 
+    /**
+     * @brief Free all memory.
+     */
     void clear() {
         free(data_level0_memory_);
         data_level0_memory_ = nullptr;
@@ -162,6 +425,12 @@ class HierarchicalNSW : public AlgorithmInterface<dist_t> {
     }
 
 
+    /**
+     * @brief Comparator for distance-ordered priority queue.
+     *
+     * Sorts by distance (ascending).
+     * This makes the smallest distance the "top" element.
+     */
     struct CompareByFirst {
         constexpr bool operator()(std::pair<dist_t, tableint> const& a,
             std::pair<dist_t, tableint> const& b) const noexcept {
@@ -170,18 +439,40 @@ class HierarchicalNSW : public AlgorithmInterface<dist_t> {
     };
 
 
+    /**
+     * @brief Set search parameter ef for queries.
+     *
+     * Higher ef = better recall but slower search.
+     * Should be >= k (number of results requested).
+     *
+     * @param ef Search width during search
+     */
     void setEf(size_t ef) {
         ef_ = ef;
     }
 
 
+    /**
+     * @brief Get mutex for label-based operation.
+     *
+     * Uses lock to reduce contention - labels are hashed
+     * to one of MAX_LABEL_OPERATION_LOCKS buckets.
+     *
+     * @param label The label to lock
+     * @return Reference to mutex for this label
+     */
     inline std::mutex& getLabelOpMutex(labeltype label) const {
-        // calculate hash
         size_t lock_id = label & (MAX_LABEL_OPERATION_LOCKS - 1);
         return label_op_locks_[lock_id];
     }
 
 
+    /**
+     * @brief Get external label from internal ID.
+     *
+     * @param internal_id Internal ID
+     * @return External label
+     */
     inline labeltype getExternalLabel(tableint internal_id) const {
         labeltype return_label;
         memcpy(&return_label, (data_level0_memory_ + internal_id * size_data_per_element_ + label_offset_), sizeof(labeltype));
@@ -189,39 +480,111 @@ class HierarchicalNSW : public AlgorithmInterface<dist_t> {
     }
 
 
+    /**
+     * @brief Set external label for internal ID.
+     */
     inline void setExternalLabel(tableint internal_id, labeltype label) const {
         memcpy((data_level0_memory_ + internal_id * size_data_per_element_ + label_offset_), &label, sizeof(labeltype));
     }
 
 
+    /**
+     * @brief Get pointer to external label for internal ID.
+     */
     inline labeltype *getExternalLabeLp(tableint internal_id) const {
         return (labeltype *) (data_level0_memory_ + internal_id * size_data_per_element_ + label_offset_);
     }
 
 
+    /**
+     * @brief Get pointer to vector data for internal ID.
+     *
+     * @param internal_id Internal element ID
+     * @return Pointer to vector data (size = data_size_)
+     */
     inline char *getDataByInternalId(tableint internal_id) const {
         return (data_level0_memory_ + internal_id * size_data_per_element_ + offsetData_);
     }
 
 
+    /**
+     * @brief Generate random level for new element.
+     *
+     * Uses exponential distribution:
+     *   level ~ Geometric(p) where p = 1/M
+     *   P(level >= l) = exp(-l/M)
+     *
+     * This creates the characteristic hierarchical structure
+     * where higher levels have exponentially fewer elements.
+     *
+     * @param reverse_size = 1/log(M) = M (after inverse)
+     * @return Random level for new element
+     *
+     * @note Uses: level = floor(-log(random) * mult_)
+     *        where mult_ = 1/log(M)
+     */
     int getRandomLevel(double reverse_size) {
         std::uniform_real_distribution<double> distribution(0.0, 1.0);
         double r = -log(distribution(level_generator_)) * reverse_size;
         return (int) r;
     }
 
+    /**
+     * @brief Get maximum capacity.
+     */
     size_t getMaxElements() {
         return max_elements_;
     }
 
+    /**
+     * @brief Get current element count.
+     */
     size_t getCurrentElementCount() {
         return cur_element_count;
     }
 
+    /**
+     * @brief Get number of deleted elements.
+     */
     size_t getDeletedCount() {
         return num_deleted_;
     }
 
+    /**
+     * @brief Search one layer of the HNSW graph.
+     *
+     * This is the core greedy search algorithm used during
+     * both index construction and query answering.
+     *
+     * ALGORITHM (Greedy Best-First with beam search):
+     *   1. Start with entry point in priority queue
+     *   2. While candidates not empty:
+     *      a. Pop closest candidate
+     *      b. If candidate too far, we have the best - STOP
+     *      c. Otherwise, explore its neighbors
+     *      d. Add unvisited neighbors to candidates
+     *      e. Add to results if better than worst
+     *   3. Return top ef results
+     *
+     * DATA STRUCTURES:
+     *   - top_candidates: min-heap of results (distance, id)
+     *   - candidateSet: max-heap of candidates to explore (-dist, id)
+     *   - visited_array: marks visited elements
+     *
+     * WHY TWO QUEUES?
+     *   - candidateSet lets us explore in best-first order
+     *   - top_candidates tracks best found so far
+     *   - Using negative distances gives max-heap behavior
+     *
+     * STOPPING CONDITION:
+     *   Stop if: -dist > lowerBound AND |results| >= ef
+     *   Meaning: we've found ef results and no candidate can beat the worst one
+     *
+     * @param ep_id Starting element ID (entry point)
+     * @param data_point Query vector
+     * @param layer Which layer to search
+     * @return Priority queue of (dist, id), closest first
+     */
     std::priority_queue<std::pair<dist_t, tableint>, std::vector<std::pair<dist_t, tableint>>, CompareByFirst>
     searchBaseLayer(tableint ep_id, const void *data_point, int layer) {
         VisitedList *vl = visited_list_pool_->getFreeVisitedList();
@@ -849,6 +1212,19 @@ class HierarchicalNSW : public AlgorithmInterface<dist_t> {
     /*
     * Marks an element with the given label deleted, does NOT really change the current graph.
     */
+    /**
+     * @brief Mark an element as deleted (soft delete).
+     *
+     * The element remains in the index but is marked as deleted.
+     * It will be excluded from search results but its
+     * edges remain for graph traversal.
+     *
+     * @param label The element's external label
+     *
+     * @note This does NOT free the element's memory or edges.
+     *       Use allow_replace_deleted=true in constructor
+     *       to allow reusing deleted slots.
+     */
     void markDelete(labeltype label) {
         // lock all operations with element by label
         std::unique_lock <std::mutex> lock_label(getLabelOpMutex(label));
@@ -1149,6 +1525,40 @@ class HierarchicalNSW : public AlgorithmInterface<dist_t> {
     }
 
 
+    /**
+     * @brief Internal addPoint implementation.
+     *
+     * This is where the magic happens! Here's how elements are added:
+     *
+     * STEP 1: Get internal ID
+     *   - Check if label already exists
+     *   - If yes, update the existing element
+     *   - If no, assign next available ID
+     *
+     * STEP 2: Generate random level
+     *   - Uses exponential distribution
+     *   - Most elements go to level 0 only
+     *   - Few elements go to higher levels
+     *
+     * STEP 3: Find entry point
+     *   - Start at existing entry point
+     *   - Greedily descend higher levels
+     *   - Find closest point to start connecting
+     *
+     * STEP 4: Connect at each level
+     *   - For each level <= element's level:
+     *     a. Search for efConstruction closest neighbors
+     *     b. Apply heuristic (filter redundant edges)
+     *     c. Create bidirectional edges
+     *
+     * STEP 5: Update entry point if needed
+     *   - If new element is highest level, make it entry point
+     *
+     * @param data_point Pointer to vector data
+     * @param label External label
+     * @param level Force specific level (-1 = random)
+     * @return Internal ID of inserted element
+     */
     tableint addPoint(const void *data_point, labeltype label, int level) {
         tableint cur_c = 0;
         {
@@ -1266,6 +1676,29 @@ class HierarchicalNSW : public AlgorithmInterface<dist_t> {
     }
 
 
+    /**
+     * @brief Search for k nearest neighbors.
+     *
+     * MAIN USER-FACING FUNCTION for querying the index.
+     *
+     * ALGORITHM:
+     *   1. Greedy descent: Start at entry point, follow closest edges
+     *      down through higher layers (skip the detailed searches)
+     *   2. Base layer search: Full beam search with ef width
+     *   3. Return top k results
+     *
+     * OPTIMIZATION:
+     *   - If no deletions and no filter, use "bare_bone" search (faster)
+     *   - Otherwise, check deleted marks and apply filters
+     *
+     * @param query_data Pointer to query vector
+     * @param k Number of results to return
+     * @param isIdAllowed Optional filter (return nullptr to skip)
+     * @return Priority queue of (distance, label), closest first
+     *
+     * @note Results are in a priority queue - closest result is top()
+     * @note Call setEf() before searching to adjust accuracy/speed
+     */
     std::priority_queue<std::pair<dist_t, labeltype >>
     searchKnn(const void *query_data, size_t k, BaseFilterFunctor* isIdAllowed = nullptr) const {
         std::priority_queue<std::pair<dist_t, labeltype >> result;
@@ -1274,6 +1707,13 @@ class HierarchicalNSW : public AlgorithmInterface<dist_t> {
         tableint currObj = enterpoint_node_;
         dist_t curdist = fstdistfunc_(query_data, getDataByInternalId(enterpoint_node_), dist_func_param_);
 
+        /**
+         * PHASE 1: Greedy descent through higher layers.
+         *
+         * Starting from top layer, greedily follow the closest edge
+         * until we can't find anything closer.
+         * This is O(log n) - we skip layers quickly.
+         */
         for (int level = maxlevel_; level > 0; level--) {
             bool changed = true;
             while (changed) {
@@ -1301,6 +1741,12 @@ class HierarchicalNSW : public AlgorithmInterface<dist_t> {
             }
         }
 
+        /**
+         * PHASE 2: Full beam search at base layer.
+         *
+         * Now do a proper search with beam width ef.
+         * This is where the approximation happens.
+         */
         std::priority_queue<std::pair<dist_t, tableint>, std::vector<std::pair<dist_t, tableint>>, CompareByFirst> top_candidates;
         bool bare_bone_search = !num_deleted_ && !isIdAllowed;
         if (bare_bone_search) {
@@ -1311,6 +1757,9 @@ class HierarchicalNSW : public AlgorithmInterface<dist_t> {
                     currObj, query_data, std::max(ef_, k), isIdAllowed);
         }
 
+        /**
+         * PHASE 3: Extract top k results.
+         */
         while (top_candidates.size() > k) {
             top_candidates.pop();
         }

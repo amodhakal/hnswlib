@@ -6,22 +6,66 @@
 #include <assert.h>
 
 namespace hnswlib {
+
+/**
+ * @file bruteforce.h
+ * @brief Brute-force (exact) nearest neighbor search implementation.
+ *
+ * This provides an exact (= brute-force) ANN index as a fallback or comparison.
+ * While not scalable, it gives perfect recall and is useful for:
+ *   - Small datasets (up to ~10K elements)
+ *   - Ground truth for evaluating HNSW accuracy
+ *   - When exact results are required
+ *
+ * The implementation stores all vectors in a flat array and computes
+ * distances sequentially during search.
+ *
+ * PERFORMANCE:
+ *   - Add: O(1) amortized
+ *   - Search: O(n) where n = number of elements
+ *   - Memory: O(n * dim)
+ *
+ * This is the "dumb" baseline that HNSW is compared against.
+ */
+
+/**
+ * @class BruteforceSearch
+ * @brief Brute-force (exact) nearest neighbor search.
+ *
+ * Stores vectors in a contiguous array. For search, computes
+ * distance to every vector and returns the k closest.
+ *
+ * Thread-safe with mutex locking.
+ *
+ * @tparam dist_t Distance type (float, int, etc.)
+ */
 template<typename dist_t>
 class BruteforceSearch : public AlgorithmInterface<dist_t> {
  public:
-    char *data_;
-    size_t maxelements_;
-    size_t cur_element_count;
-    size_t size_per_element_;
+    char *data_;                        ///< Contiguous storage for all vectors + labels
+    size_t maxelements_;               ///< Maximum elements (capacity)
+    size_t cur_element_count;        ///< Current element count
+    size_t size_per_element_;        ///< Bytes per element (vector + label)
 
-    size_t data_size_;
-    DISTFUNC <dist_t> fstdistfunc_;
-    void *dist_func_param_;
-    std::mutex index_lock;
+    size_t data_size_;               ///< Size of vector data in bytes
+    DISTFUNC <dist_t> fstdistfunc_;  ///< Distance function
+    void *dist_func_param_;           ///< Parameter for distance function
+    std::mutex index_lock;          ///< Mutex for thread safety
 
+    /**
+     * @brief Map from external label to internal index.
+     *
+     * External labels are user-provided IDs (any unique value).
+     * Internal indices are positions in our data array.
+     * This maps between them.
+     */
     std::unordered_map<labeltype, size_t > dict_external_to_internal;
 
 
+    /**
+     * @brief Create empty brute-force index.
+     * @param s The space (defines distance function)
+     */
     BruteforceSearch(SpaceInterface <dist_t> *s)
         : data_(nullptr),
             maxelements_(0),
@@ -32,6 +76,11 @@ class BruteforceSearch : public AlgorithmInterface<dist_t> {
     }
 
 
+    /**
+     * @brief Load index from file.
+     * @param s The space
+     * @param location File path
+     */
     BruteforceSearch(SpaceInterface<dist_t> *s, const std::string &location)
         : data_(nullptr),
             maxelements_(0),
@@ -43,6 +92,11 @@ class BruteforceSearch : public AlgorithmInterface<dist_t> {
     }
 
 
+    /**
+     * @brief Create brute-force index with capacity.
+     * @param s The space
+     * @param maxElements Maximum number of elements
+     */
     BruteforceSearch(SpaceInterface <dist_t> *s, size_t maxElements) {
         maxelements_ = maxElements;
         data_size_ = s->get_data_size();
@@ -56,11 +110,24 @@ class BruteforceSearch : public AlgorithmInterface<dist_t> {
     }
 
 
+    /**
+     * @brief Destructor - free allocated memory.
+     */
     ~BruteforceSearch() {
         free(data_);
     }
 
 
+    /**
+     * @brief Add a point to the index.
+     *
+     * If label already exists, update its vector.
+     * Otherwise, add as new element.
+     *
+     * @param datapoint Pointer to vector data
+     * @param label Unique identifier
+     * @param replace_deleted Ignored (for API compatibility)
+     */
     void addPoint(const void *datapoint, labeltype label, bool replace_deleted = false) {
         int idx;
         {
@@ -83,6 +150,13 @@ class BruteforceSearch : public AlgorithmInterface<dist_t> {
     }
 
 
+    /**
+     * @brief Remove a point from the index.
+     *
+     * Swaps with last element to maintain contiguity.
+     *
+     * @param cur_external Label to remove
+     */
     void removePoint(labeltype cur_external) {
         std::unique_lock<std::mutex> lock(index_lock);
 
@@ -103,6 +177,17 @@ class BruteforceSearch : public AlgorithmInterface<dist_t> {
     }
 
 
+    /**
+     * @brief Search for k nearest neighbors.
+     *
+     * Computes distance to ALL elements, returns k closest.
+     * This is O(n) where n = element count.
+     *
+     * @param query_data Query vector
+     * @param k Number of results
+     * @param isIdAllowed Optional filter
+     * @return Priority queue (dist, label) pairs, closest first
+     */
     std::priority_queue<std::pair<dist_t, labeltype >>
     searchKnn(const void *query_data, size_t k, BaseFilterFunctor* isIdAllowed = nullptr) const {
         assert(k <= cur_element_count);
@@ -125,6 +210,10 @@ class BruteforceSearch : public AlgorithmInterface<dist_t> {
     }
 
 
+    /**
+     * @brief Save index to file.
+     * @param location File path
+     */
     void saveIndex(const std::string &location) {
         std::ofstream output(location, std::ios::binary);
         std::streampos position;
@@ -139,6 +228,11 @@ class BruteforceSearch : public AlgorithmInterface<dist_t> {
     }
 
 
+    /**
+     * @brief Load index from file.
+     * @param location File path
+     * @param s The space
+     */
     void loadIndex(const std::string &location, SpaceInterface<dist_t> *s) {
         std::ifstream input(location, std::ios::binary);
         std::streampos position;
