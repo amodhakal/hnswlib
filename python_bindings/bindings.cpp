@@ -151,6 +151,7 @@ class Index {
     int dim;
     size_t seed;
     size_t default_ef;
+    typename hnswlib::HierarchicalNSW<dist_t>::SearchStrategy default_search_strategy;
 
     bool index_inited;
     bool ep_added;
@@ -179,6 +180,7 @@ class Index {
         num_threads_default = std::thread::hardware_concurrency();
 
         default_ef = 10;
+        default_search_strategy = hnswlib::HierarchicalNSW<dist_t>::STANDARD;
     }
 
 
@@ -203,6 +205,7 @@ class Index {
         index_inited = true;
         ep_added = false;
         appr_alg->ef_ = default_ef;
+        appr_alg->setSearchStrategy(default_search_strategy);
         seed = random_seed;
     }
 
@@ -211,6 +214,34 @@ class Index {
       default_ef = ef;
       if (appr_alg)
           appr_alg->ef_ = ef;
+    }
+
+
+    static typename hnswlib::HierarchicalNSW<dist_t>::SearchStrategy parse_search_mode(const std::string &mode) {
+        if (mode == "standard") {
+            return hnswlib::HierarchicalNSW<dist_t>::STANDARD;
+        }
+        if (mode == "vf" || mode == "vf_hnsw" || mode == "virtually_flattened") {
+            return hnswlib::HierarchicalNSW<dist_t>::VIRTUAL_FLATTENED;
+        }
+        throw std::invalid_argument("search mode must be one of: standard, vf, vf_hnsw, virtually_flattened");
+    }
+
+
+    void set_search_mode(const std::string &mode) {
+        default_search_strategy = parse_search_mode(mode);
+        if (appr_alg) {
+            appr_alg->setSearchStrategy(default_search_strategy);
+        }
+    }
+
+
+    std::string get_search_mode() const {
+        auto search_strategy = appr_alg ? appr_alg->getSearchStrategy() : default_search_strategy;
+        if (search_strategy == hnswlib::HierarchicalNSW<dist_t>::VIRTUAL_FLATTENED) {
+            return "vf_hnsw";
+        }
+        return "standard";
     }
 
 
@@ -235,6 +266,7 @@ class Index {
       appr_alg = new hnswlib::HierarchicalNSW<dist_t>(l2space, path_to_index, false, max_elements, allow_replace_deleted);
       cur_l = appr_alg->cur_element_count;
       index_inited = true;
+      appr_alg->setSearchStrategy(default_search_strategy);
     }
 
 
@@ -471,7 +503,8 @@ class Index {
             "ep_added"_a = ep_added,
             "normalize"_a = normalize,
             "num_threads"_a = num_threads_default,
-            "seed"_a = seed);
+            "seed"_a = seed,
+            "search_mode"_a = get_search_mode());
 
         if (index_inited == false)
             return py::dict(**params, "ef"_a = default_ef);
@@ -495,6 +528,9 @@ class Index {
         /*  TODO: deserialize state of random generators into new_index->level_generator_ and new_index->update_probability_generator_  */
         /*        for full reproducibility / state of generators is serialized inside Index::getIndexParams                      */
         new_index->seed = d["seed"].cast<size_t>();
+        if (d.contains("search_mode")) {
+            new_index->default_search_strategy = parse_search_mode(d["search_mode"].cast<std::string>());
+        }
 
         if (index_inited_) {
             new_index->appr_alg = new hnswlib::HierarchicalNSW<dist_t>(
@@ -504,6 +540,7 @@ class Index {
                 d["ef_construction"].cast<size_t>(),
                 new_index->seed);
             new_index->cur_l = d["cur_element_count"].cast<size_t>();
+            new_index->appr_alg->setSearchStrategy(new_index->default_search_strategy);
         }
 
         new_index->index_inited = index_inited_;
@@ -545,6 +582,7 @@ class Index {
         assert_true(appr_alg->ef_construction_ == d["ef_construction"].cast<size_t>(), "Invalid value of ef_construction_ ");
 
         appr_alg->ef_ = d["ef"].cast<size_t>();
+        appr_alg->setSearchStrategy(default_search_strategy);
 
         assert_true(appr_alg->size_links_per_element_ == d["size_links_per_element"].cast<size_t>(), "Invalid value of size_links_per_element_ ");
 
@@ -960,6 +998,8 @@ PYBIND11_PLUGIN(hnswlib) {
         .def("get_items", &Index<float>::getData, py::arg("ids") = py::none(), py::arg("return_type") = "numpy")
         .def("get_ids_list", &Index<float>::getIdsList)
         .def("set_ef", &Index<float>::set_ef, py::arg("ef"))
+        .def("set_search_mode", &Index<float>::set_search_mode, py::arg("mode"))
+        .def("get_search_mode", &Index<float>::get_search_mode)
         .def("set_num_threads", &Index<float>::set_num_threads, py::arg("num_threads"))
         .def("index_file_size", &Index<float>::indexFileSize)
         .def("save_index", &Index<float>::saveIndex, py::arg("path_to_index"))
@@ -984,6 +1024,13 @@ PYBIND11_PLUGIN(hnswlib) {
             index.default_ef = ef_;
             if (index.appr_alg)
               index.appr_alg->ef_ = ef_;
+        })
+        .def_property("search_mode",
+          [](const Index<float> & index) {
+            return index.get_search_mode();
+          },
+          [](Index<float> & index, const std::string &mode) {
+            index.set_search_mode(mode);
         })
         .def_property_readonly("max_elements", [](const Index<float> & index) {
             return index.index_inited ? index.appr_alg->max_elements_ : 0;

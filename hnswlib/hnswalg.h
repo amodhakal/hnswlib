@@ -174,6 +174,13 @@ class HierarchicalNSW : public AlgorithmInterface<dist_t> {
     size_t ef_construction_{0};       ///< ef during build
     size_t ef_{ 0 };                 ///< ef during search
 
+    enum SearchStrategy {
+        STANDARD = 0,
+        VIRTUAL_FLATTENED = 1,
+    };
+
+    SearchStrategy search_strategy_{STANDARD};  ///< Query-time traversal strategy
+
     // ========================================================================
     // LEVEL DISTRIBUTION
     // ========================================================================
@@ -449,6 +456,14 @@ class HierarchicalNSW : public AlgorithmInterface<dist_t> {
      */
     void setEf(size_t ef) {
         ef_ = ef;
+    }
+
+    void setSearchStrategy(SearchStrategy search_strategy) {
+        search_strategy_ = search_strategy;
+    }
+
+    SearchStrategy getSearchStrategy() const {
+        return search_strategy_;
     }
 
 
@@ -795,6 +810,144 @@ class HierarchicalNSW : public AlgorithmInterface<dist_t> {
                             lowerBound = top_candidates.top().first;
                     }
                 }
+            }
+        }
+
+        visited_list_pool_->releaseVisitedList(vl);
+        return top_candidates;
+    }
+
+
+    // Experimental search that expands one node across its available layers in a single traversal.
+    template <bool bare_bone_search = true, bool collect_metrics = false>
+    std::priority_queue<std::pair<dist_t, tableint>, std::vector<std::pair<dist_t, tableint>>, CompareByFirst>
+    searchBaseLayerSTVF(
+        tableint ep_id,
+        const void *data_point,
+        size_t ef,
+        BaseFilterFunctor* isIdAllowed = nullptr,
+        BaseSearchStopCondition<dist_t>* stop_condition = nullptr) const {
+        VisitedList *vl = visited_list_pool_->getFreeVisitedList();
+        vl_type *visited_array = vl->mass;
+        vl_type visited_array_tag = vl->curV;
+
+        std::priority_queue<std::pair<dist_t, tableint>, std::vector<std::pair<dist_t, tableint>>, CompareByFirst> top_candidates;
+        std::priority_queue<std::pair<dist_t, tableint>, std::vector<std::pair<dist_t, tableint>>, CompareByFirst> candidate_set;
+
+        dist_t lowerBound;
+        if (bare_bone_search ||
+            (!isMarkedDeleted(ep_id) && ((!isIdAllowed) || (*isIdAllowed)(getExternalLabel(ep_id))))) {
+            char* ep_data = getDataByInternalId(ep_id);
+            dist_t dist = fstdistfunc_(data_point, ep_data, dist_func_param_);
+            lowerBound = dist;
+            top_candidates.emplace(dist, ep_id);
+            if (!bare_bone_search && stop_condition) {
+                stop_condition->add_point_to_result(getExternalLabel(ep_id), ep_data, dist);
+            }
+            candidate_set.emplace(-dist, ep_id);
+        } else {
+            lowerBound = std::numeric_limits<dist_t>::max();
+            candidate_set.emplace(-lowerBound, ep_id);
+        }
+
+        visited_array[ep_id] = visited_array_tag;
+
+        while (!candidate_set.empty()) {
+            std::pair<dist_t, tableint> current_node_pair = candidate_set.top();
+            dist_t candidate_dist = -current_node_pair.first;
+
+            bool flag_stop_search;
+            if (bare_bone_search) {
+                flag_stop_search = candidate_dist > lowerBound;
+            } else {
+                if (stop_condition) {
+                    flag_stop_search = stop_condition->should_stop_search(candidate_dist, lowerBound);
+                } else {
+                    flag_stop_search = candidate_dist > lowerBound && top_candidates.size() == ef;
+                }
+            }
+            if (flag_stop_search) {
+                break;
+            }
+            candidate_set.pop();
+
+            tableint current_node_id = current_node_pair.second;
+            dist_t best_upper_layer_dist = std::numeric_limits<dist_t>::max();
+
+            for (int level = element_levels_[current_node_id]; level >= 0; level--) {
+                int *data = (int *) get_linklist_at_level(current_node_id, level);
+                size_t size = getListCount((linklistsizeint*)data);
+                if (collect_metrics) {
+                    metric_hops++;
+                    metric_distance_computations += size;
+                }
+
+                dist_t best_current_layer_dist = std::numeric_limits<dist_t>::max();
+
+                for (size_t j = 1; j <= size; j++) {
+                    int candidate_id = *(data + j);
+                    if (visited_array[candidate_id] == visited_array_tag) {
+                        continue;
+                    }
+                    visited_array[candidate_id] = visited_array_tag;
+
+                    char *currObj1 = getDataByInternalId(candidate_id);
+                    dist_t dist = fstdistfunc_(data_point, currObj1, dist_func_param_);
+                    if (dist < best_current_layer_dist) {
+                        best_current_layer_dist = dist;
+                    }
+
+                    bool flag_consider_candidate;
+                    if (!bare_bone_search && stop_condition) {
+                        flag_consider_candidate = stop_condition->should_consider_candidate(dist, lowerBound);
+                    } else {
+                        flag_consider_candidate = top_candidates.size() < ef || lowerBound > dist;
+                    }
+
+                    if (!flag_consider_candidate) {
+                        continue;
+                    }
+
+                    candidate_set.emplace(-dist, candidate_id);
+
+                    if (bare_bone_search ||
+                        (!isMarkedDeleted(candidate_id) && ((!isIdAllowed) || (*isIdAllowed)(getExternalLabel(candidate_id))))) {
+                        top_candidates.emplace(dist, candidate_id);
+                        if (!bare_bone_search && stop_condition) {
+                            stop_condition->add_point_to_result(getExternalLabel(candidate_id), currObj1, dist);
+                        }
+                    }
+
+                    bool flag_remove_extra = false;
+                    if (!bare_bone_search && stop_condition) {
+                        flag_remove_extra = stop_condition->should_remove_extra();
+                    } else {
+                        flag_remove_extra = top_candidates.size() > ef;
+                    }
+                    while (flag_remove_extra) {
+                        tableint id = top_candidates.top().second;
+                        top_candidates.pop();
+                        if (!bare_bone_search && stop_condition) {
+                            stop_condition->remove_point_from_result(getExternalLabel(id), getDataByInternalId(id), dist);
+                            flag_remove_extra = stop_condition->should_remove_extra();
+                        } else {
+                            flag_remove_extra = top_candidates.size() > ef;
+                        }
+                    }
+
+                    if (!top_candidates.empty()) {
+                        lowerBound = top_candidates.top().first;
+                    }
+                }
+
+                if (best_current_layer_dist == std::numeric_limits<dist_t>::max()) {
+                    continue;
+                }
+                if (best_current_layer_dist < best_upper_layer_dist) {
+                    best_upper_layer_dist = best_current_layer_dist;
+                    continue;
+                }
+                break;
             }
         }
 
@@ -1704,6 +1857,28 @@ class HierarchicalNSW : public AlgorithmInterface<dist_t> {
         std::priority_queue<std::pair<dist_t, labeltype >> result;
         if (cur_element_count == 0) return result;
 
+        if (search_strategy_ == VIRTUAL_FLATTENED) {
+            std::priority_queue<std::pair<dist_t, tableint>, std::vector<std::pair<dist_t, tableint>>, CompareByFirst> top_candidates;
+            bool bare_bone_search = !num_deleted_ && !isIdAllowed;
+            if (bare_bone_search) {
+                top_candidates = searchBaseLayerSTVF<true>(
+                        enterpoint_node_, query_data, std::max(ef_, k), isIdAllowed);
+            } else {
+                top_candidates = searchBaseLayerSTVF<false>(
+                        enterpoint_node_, query_data, std::max(ef_, k), isIdAllowed);
+            }
+
+            while (top_candidates.size() > k) {
+                top_candidates.pop();
+            }
+            while (top_candidates.size() > 0) {
+                std::pair<dist_t, tableint> rez = top_candidates.top();
+                result.push(std::pair<dist_t, labeltype>(rez.first, getExternalLabel(rez.second)));
+                top_candidates.pop();
+            }
+            return result;
+        }
+
         tableint currObj = enterpoint_node_;
         dist_t curdist = fstdistfunc_(query_data, getDataByInternalId(enterpoint_node_), dist_func_param_);
 
@@ -1779,6 +1954,21 @@ class HierarchicalNSW : public AlgorithmInterface<dist_t> {
         BaseFilterFunctor* isIdAllowed = nullptr) const {
         std::vector<std::pair<dist_t, labeltype >> result;
         if (cur_element_count == 0) return result;
+
+        if (search_strategy_ == VIRTUAL_FLATTENED) {
+            std::priority_queue<std::pair<dist_t, tableint>, std::vector<std::pair<dist_t, tableint>>, CompareByFirst> top_candidates;
+            top_candidates = searchBaseLayerSTVF<false>(enterpoint_node_, query_data, 0, isIdAllowed, &stop_condition);
+
+            size_t sz = top_candidates.size();
+            result.resize(sz);
+            while (!top_candidates.empty()) {
+                result[--sz] = top_candidates.top();
+                top_candidates.pop();
+            }
+
+            stop_condition.filter_results(result);
+            return result;
+        }
 
         tableint currObj = enterpoint_node_;
         dist_t curdist = fstdistfunc_(query_data, getDataByInternalId(enterpoint_node_), dist_func_param_);

@@ -11,4 +11,7 @@ var/
 .vs/
 .cache/
 **.DS_Store
-*.pyc
+*.__pycache__
+
+benchmark_dim384_n10000_t4.csv
+embeddings_100k.npy
