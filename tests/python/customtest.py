@@ -7,6 +7,7 @@ from typing import Dict, List, Optional, Tuple
 import h5py
 import hnswlib
 import matplotlib.pyplot as plt
+from matplotlib.ticker import ScalarFormatter
 import numpy as np
 
 
@@ -16,7 +17,6 @@ def load_hdf5_data(
     """Load train/test vectors from HDF5 file (e.g., ann-benchmarks format)."""
     print(f"Loading HDF5 data from {data_path}")
     with h5py.File(data_path, "r") as f:
-        # ann-benchmarks format has 'train', 'test', and 'distances' keys
         train_data = f["train"][:]
         test_data = f["test"][:]
 
@@ -166,76 +166,47 @@ def benchmark_search(
     }
 
 
-def summarize_mode(name: str, metrics: Dict[str, object]) -> None:
-    print(f"\n{name}")
-    print(f"  Search mode: {metrics['mode']}")
-    print(f"  QPS: {metrics['qps']:.0f}")
-    print(f"  Latency: {metrics['latency_ms']:.3f}ms per query")
-    print(f"  Time: {metrics['mean_time']:.3f}s +/- {metrics['std_time']:.3f}s")
-
-
-def summarize_comparison(
-    ef: int, comparison: Dict[str, object], k: int, recall_queries: int
-) -> None:
-    baseline = comparison["baseline"]
-    vf = comparison["vf"]
-
-    print(f"\nEF={ef}")
-    summarize_mode("Baseline HNSW", baseline)
-    summarize_mode("VF-HNSW", vf)
-    print(f"\nResult overlap@{k}: {comparison['overlap']:.4f}")
-    print(f"VF time ratio vs baseline: {comparison['vf_time_ratio']:.3f}x")
-
-    if recall_queries > 0:
-        print(
-            f"Baseline recall@{k} on {recall_queries} exact queries: "
-            f"{comparison['baseline_recall']:.4f}"
-        )
-        print(
-            f"VF-HNSW recall@{k} on {recall_queries} exact queries: "
-            f"{comparison['vf_recall']:.4f}"
-        )
-
-
-def generate_qps_frontier_chart(
+def generate_recall_qps_chart(
     comparisons: List[Dict], k: int, chart_dir: str = "charts"
 ):
     """
-    Create a line chart:  x = ef value,  y = QPS.
-    Two lines are drawn:  baseline (standard) and vf (vf_hnsw).
-
-    The chart is saved as ``<benchmark_name>.png`` inside ``chart_dir``.
+    Create a standard ANN-benchmark chart: X = Recall, Y = Log(QPS).
     """
-    # ------------------------------------------------------------------
-    # Prepare data
-    # ------------------------------------------------------------------
-    ef_values = sorted({c["ef"] for c in comparisons})
-    baseline_qps = []
-    vf_qps = []
+    # Filter out entries that don't have recall computed
+    comps = [c for c in comparisons if "baseline_recall" in c and "vf_recall" in c]
+    if not comps:
+        return None
 
-    for ef in ef_values:
-        # Find the comparison entry that contains this ef
-        entry = next(c for c in comparisons if c["ef"] == ef)
-        baseline_qps.append(entry["baseline"]["qps"])
-        vf_qps.append(entry["vf"]["qps"])
+    ef_values = [c["ef"] for c in comps]
+    base_recall = [c["baseline_recall"] for c in comps]
+    base_qps = [c["baseline"]["qps"] for c in comps]
+    
+    vf_recall = [c["vf_recall"] for c in comps]
+    vf_qps = [c["vf"]["qps"] for c in comps]
 
-    # ------------------------------------------------------------------
-    # Build a readable benchmark name
-    # ------------------------------------------------------------------
-    benchmark_tag = f"ef{'_'.join(map(str, ef_values))}_k{k}"
-    out_path = Path(chart_dir) / f"{benchmark_tag}.png"
+    out_path = Path(chart_dir) / f"recall_qps_k{k}.png"
     out_path.parent.mkdir(parents=True, exist_ok=True)
 
-    # ------------------------------------------------------------------
-    # Plot
-    # ------------------------------------------------------------------
-    plt.figure(figsize=(8, 5))
-    plt.plot(ef_values, baseline_qps, marker="o", label=f"Baseline (k={k})")
-    plt.plot(ef_values, vf_qps, marker="s", label=f"VF‑HNSW (k={k})")
-    plt.title(f"QPS vs. ef (search mode = k={k})")
-    plt.xlabel("ef (search parameter)")
+    plt.figure(figsize=(9, 6))
+    
+    # Plot curves
+    plt.plot(base_recall, base_qps, marker="o", label=f"Baseline HNSW (k={k})", linestyle='-', markersize=8)
+    plt.plot(vf_recall, vf_qps, marker="s", label=f"VF‑HNSW (k={k})", linestyle='-', markersize=8)
+    
+    # Annotate points with their ef values
+    for i, ef in enumerate(ef_values):
+        plt.annotate(f"ef={ef}", (base_recall[i], base_qps[i]), textcoords="offset points", xytext=(-10,10), ha='center', fontsize=9, color='blue')
+        plt.annotate(f"ef={ef}", (vf_recall[i], vf_qps[i]), textcoords="offset points", xytext=(10,-15), ha='center', fontsize=9, color='orange')
+
+    plt.title(f"Recall vs. QPS Frontier (Dataset: MNIST-784)")
+    plt.xlabel(f"Recall@{k}")
     plt.ylabel("Queries per second (QPS)")
-    plt.grid(True, which="both", ls=":", alpha=0.6)
+    
+    # Standard ANN graph uses Log scale for QPS
+    plt.yscale("log")
+    plt.gca().yaxis.set_major_formatter(ScalarFormatter())
+    
+    plt.grid(True, which="both", ls=":", alpha=0.7)
     plt.legend()
     plt.tight_layout()
     plt.savefig(out_path, dpi=150)
@@ -248,8 +219,9 @@ def summarize_frontier_table(
     comparisons: List[Dict[str, object]], k: int, recall_queries: int
 ) -> None:
     print("\nSummary")
+    # Changed header from vf/base to time_ratio for clarity
     header = (
-        f"{'ef':>6} {'base_qps':>10} {'vf_qps':>10} {'vf/base':>8} " f"{'overlap':>8}"
+        f"{'ef':>6} {'base_qps':>10} {'vf_qps':>10} {'time_ratio':>12} " f"{'overlap':>8}"
     )
     if recall_queries > 0:
         header += f" {'base_r@' + str(k):>10} {'vf_r@' + str(k):>10}"
@@ -260,7 +232,7 @@ def summarize_frontier_table(
             f"{comparison['ef']:>6} "
             f"{comparison['baseline']['qps']:>10.0f} "
             f"{comparison['vf']['qps']:>10.0f} "
-            f"{comparison['vf_time_ratio']:>8.3f} "
+            f"{comparison['vf_time_ratio']:>11.3f}x "
             f"{comparison['overlap']:>8.4f}"
         )
         if recall_queries > 0:
@@ -271,109 +243,31 @@ def summarize_frontier_table(
         print(row)
 
 
-def build_log_file_path(
-    dim: int, total_elements: int, threads: int, data_path: str
-) -> str:
-    dataset_tag = os.path.splitext(os.path.basename(data_path))[0]
-    dataset_tag = dataset_tag.replace(" ", "_")
-    return (
-        f"benchmarks/benchmark_{dataset_tag}_dim{dim}_n{total_elements}_t{threads}.csv"
-    )
-
-
-def append_results(
-    log_file: str,
-    data_path: str,
-    train_size: int,
-    test_size: int,
-    m: int,
-    ef_construction: int,
-    build_time: float,
-    comparisons: List[Dict[str, object]],
-    recall_queries: int,
-) -> None:
-    os.makedirs(os.path.dirname(log_file), exist_ok=True)
-    with open(log_file, "a", encoding="utf-8") as handle:
-        for comparison in comparisons:
-            for mode_key in ("baseline", "vf"):
-                metrics = comparison[mode_key]
-                recall_value = ""
-                if recall_queries > 0:
-                    recall_value = (
-                        comparison["baseline_recall"]
-                        if mode_key == "baseline"
-                        else comparison["vf_recall"]
-                    )
-                handle.write(
-                    f"{os.path.basename(data_path)},{train_size},{test_size},"
-                    f"{metrics['mode']},{m},{ef_construction},{comparison['ef']},"
-                    f"{build_time:.3f},{metrics['qps']:.0f},{metrics['latency_ms']:.3f},"
-                    f"{comparison['overlap']:.4f},{recall_value}\n"
-                )
-
-
 def main() -> None:
-    parser = argparse.ArgumentParser(
-        description="HNSW vs VF-HNSW performance benchmark"
-    )
-    parser.add_argument(
-        "--dim",
-        type=int,
-        default=None,
-        help="Vector dimension (auto-detected for HDF5)",
-    )
-    parser.add_argument(
-        "--num_elements",
-        type=int,
-        default=None,
-        help="Number of vectors (use all if not specified for HDF5)",
-    )
+    parser = argparse.ArgumentParser(description="HNSW vs VF-HNSW performance benchmark")
+    parser.add_argument("--dim", type=int, default=None, help="Vector dimension")
+    parser.add_argument("--num_elements", type=int, default=None, help="Num vectors")
     parser.add_argument("--threads", type=int, default=4, help="Number of threads")
     parser.add_argument("--M", type=int, default=16, help="HNSW M parameter")
     parser.add_argument("--ef_construction", type=int, default=200)
     parser.add_argument("--ef_search", type=int, default=50)
     parser.add_argument(
-        "--ef_values",
-        type=int,
-        nargs="+",
-        default=None,
-        help="Optional ef sweep. If provided, the index is built once and searched for each ef value.",
+        "--ef_values", type=int, nargs="+", default=None, help="Sweep over ef_search"
     )
     parser.add_argument("--k", type=int, default=10, help="Top-k results to return")
     parser.add_argument("--warmup", type=int, default=1, help="Warmup iterations")
+    parser.add_argument("--iterations", type=int, default=5, help="Timed iterations")
     parser.add_argument(
-        "--iterations", type=int, default=5, help="Timed iterations per mode"
+        "--recall_queries", type=int, default=200, help="Queries for exact recall baseline"
     )
-    parser.add_argument(
-        "--recall_queries",
-        type=int,
-        default=100,
-        help="Queries sampled for exact recall@k",
-    )
-    parser.add_argument(
-        "--data_path",
-        type=str,
-        default="data/mnist-784-euclidean.hdf5",
-        help="Path to HDF5 or numpy embeddings",
-    )
-    parser.add_argument(
-        "--log_file",
-        type=str,
-        default=None,
-        help="Optional CSV output path. Defaults to a dataset-specific file name.",
-    )
+    parser.add_argument("--data_path", type=str, default="data/mnist-784-euclidean.hdf5")
     args = parser.parse_args()
 
     # Auto-detect dimension from HDF5 if needed
-    if args.data_path.endswith(".hdf5") or args.data_path.endswith(".h5"):
+    if args.data_path.endswith((".hdf5", ".h5")):
         with h5py.File(args.data_path, "r") as f:
             detected_dim = f["train"].shape[1]
-            if args.dim is None:
-                args.dim = detected_dim
-            elif args.dim != detected_dim:
-                raise ValueError(
-                    f"Specified dim={args.dim} doesn't match HDF5 dimension {detected_dim}"
-                )
+            args.dim = detected_dim if args.dim is None else args.dim
 
     if args.dim is None:
         raise ValueError("--dim is required for non-HDF5 datasets")
@@ -384,61 +278,36 @@ def main() -> None:
     ef_values = normalize_ef_values(args.ef_values, args.ef_search)
 
     print(f"\n{'=' * 60}")
-    print("HNSW Benchmark - baseline vs VF-HNSW")
+    print("HNSW Benchmark - Baseline vs VF-HNSW")
     print(f"{'=' * 60}")
-    print(f"Data path: {args.data_path}")
-    print(f"Dataset: {len(train_data)} train, {len(test_data)} test")
-    print(f"Dimension: {args.dim}")
-    if len(ef_values) == 1:
-        print(
-            f"M={args.M}, ef_construction={args.ef_construction}, ef_search={ef_values[0]}"
-        )
-    else:
-        print(
-            f"M={args.M}, ef_construction={args.ef_construction}, ef_values={ef_values}"
-        )
-    print(f"Threads: {args.threads}, k={args.k}")
+    print(f"Data: {args.data_path} ({len(train_data)} train, {len(test_data)} test)")
+    print(f"Dim: {args.dim}, M: {args.M}, ef_construction: {args.ef_construction}")
+    print(f"Sweep ef_values: {ef_values}, Threads: {args.threads}, K: {args.k}")
 
     index = hnswlib.Index(space="l2", dim=args.dim)
-    index.init_index(
-        max_elements=len(train_data), ef_construction=args.ef_construction, M=args.M
-    )
+    index.init_index(max_elements=len(train_data), ef_construction=args.ef_construction, M=args.M)
 
     print("\nBuilding index...")
     build_time = benchmark_build(index, train_data, args.threads)
-    print(
-        f"Build time: {build_time:.2f}s ({len(train_data) / build_time:.0f} vectors/s)"
-    )
+    print(f"Build time: {build_time:.2f}s ({len(train_data) / build_time:.0f} vectors/s)")
 
     recall_queries = min(args.recall_queries, len(test_data))
     exact_labels = None
     if recall_queries > 0:
-        sample_queries = test_data[:recall_queries]
-        print(f"\nComputing exact recall baseline on {recall_queries} queries...")
-        exact_labels = exact_knn_l2(train_data, sample_queries, args.k)
+        print(f"\nComputing exact ground truth on {recall_queries} queries (brute force)...")
+        exact_labels = exact_knn_l2(train_data, test_data[:recall_queries], args.k)
 
-    print(f"\nSearching {len(test_data)} queries...")
+    print(f"\nBenchmarking Search ({len(test_data)} queries)...")
     comparisons = []
+    
     for ef in ef_values:
         baseline = benchmark_search(
-            index,
-            test_data,
-            k=args.k,
-            ef=ef,
-            threads=args.threads,
-            mode="standard",
-            warmup=args.warmup,
-            iterations=args.iterations,
+            index, test_data, k=args.k, ef=ef, threads=args.threads,
+            mode="standard", warmup=args.warmup, iterations=args.iterations,
         )
         vf = benchmark_search(
-            index,
-            test_data,
-            k=args.k,
-            ef=ef,
-            threads=args.threads,
-            mode="vf_hnsw",
-            warmup=args.warmup,
-            iterations=args.iterations,
+            index, test_data, k=args.k, ef=ef, threads=args.threads,
+            mode="vf_hnsw", warmup=args.warmup, iterations=args.iterations,
         )
 
         comparison = {
@@ -448,40 +317,20 @@ def main() -> None:
             "overlap": overlap_at_k(baseline["labels"], vf["labels"]),
             "vf_time_ratio": vf["mean_time"] / baseline["mean_time"],
         }
+        
         if exact_labels is not None:
-            comparison["baseline_recall"] = recall_at_k(
-                baseline["labels"][:recall_queries], exact_labels
-            )
-            comparison["vf_recall"] = recall_at_k(
-                vf["labels"][:recall_queries], exact_labels
-            )
+            comparison["baseline_recall"] = recall_at_k(baseline["labels"][:recall_queries], exact_labels)
+            comparison["vf_recall"] = recall_at_k(vf["labels"][:recall_queries], exact_labels)
 
-        summarize_comparison(ef, comparison, args.k, recall_queries)
         comparisons.append(comparison)
 
-    if len(comparisons) > 1:
+    if len(comparisons) > 0:
         summarize_frontier_table(comparisons, args.k, recall_queries)
 
-    log_file = args.log_file or build_log_file_path(
-        args.dim, len(train_data) + len(test_data), args.threads, args.data_path
-    )
-    append_results(
-        log_file=log_file,
-        data_path=args.data_path,
-        train_size=len(train_data),
-        test_size=len(test_data),
-        m=args.M,
-        ef_construction=args.ef_construction,
-        build_time=build_time,
-        comparisons=comparisons,
-        recall_queries=recall_queries,
-    )
-
-    print(f"\nResults appended to {log_file}")
-
-    chart_file = generate_qps_frontier_chart(comparisons, k=args.k)
-    print(f"Chart saved to: {chart_file}")
-
+    if len(comparisons) > 1 and exact_labels is not None:
+        chart_file = generate_recall_qps_chart(comparisons, k=args.k)
+        if chart_file:
+            print(f"\n[Success] Recall vs QPS chart saved to: {chart_file}")
 
 if __name__ == "__main__":
     main()
