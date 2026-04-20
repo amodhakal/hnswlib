@@ -15,3 +15,5 @@ var/
 
 benchmark_dim*.csv
 embeddings_100k.npy
+benchmarks/
+data/

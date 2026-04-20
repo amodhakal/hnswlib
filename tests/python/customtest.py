@@ -1,7 +1,7 @@
 import argparse
 import os
 import time
-from typing import Dict, Tuple
+from typing import Dict, List, Optional, Tuple
 
 import hnswlib
 import numpy as np
@@ -82,6 +82,22 @@ def recall_at_k(predicted_labels: np.ndarray, exact_labels: np.ndarray) -> float
     return float(np.mean(per_query))
 
 
+def normalize_ef_values(
+    ef_values: Optional[List[int]], fallback_ef: int
+) -> List[int]:
+    """Normalize ef inputs while preserving order."""
+    values = ef_values if ef_values is not None else [fallback_ef]
+    normalized = []
+    seen = set()
+    for ef in values:
+        if ef <= 0:
+            raise ValueError("All ef values must be positive integers")
+        if ef not in seen:
+            normalized.append(ef)
+            seen.add(ef)
+    return normalized
+
+
 def benchmark_search(
     index: hnswlib.Index,
     queries: np.ndarray,
@@ -135,6 +151,95 @@ def summarize_mode(name: str, metrics: Dict[str, object]) -> None:
     print(f"  Time: {metrics['mean_time']:.3f}s +/- {metrics['std_time']:.3f}s")
 
 
+def summarize_comparison(
+    ef: int, comparison: Dict[str, object], k: int, recall_queries: int
+) -> None:
+    baseline = comparison["baseline"]
+    vf = comparison["vf"]
+
+    print(f"\nEF={ef}")
+    summarize_mode("Baseline HNSW", baseline)
+    summarize_mode("VF-HNSW", vf)
+    print(f"\nResult overlap@{k}: {comparison['overlap']:.4f}")
+    print(f"VF time ratio vs baseline: {comparison['vf_time_ratio']:.3f}x")
+
+    if recall_queries > 0:
+        print(
+            f"Baseline recall@{k} on {recall_queries} exact queries: "
+            f"{comparison['baseline_recall']:.4f}"
+        )
+        print(
+            f"VF-HNSW recall@{k} on {recall_queries} exact queries: "
+            f"{comparison['vf_recall']:.4f}"
+        )
+
+
+def summarize_frontier_table(
+    comparisons: List[Dict[str, object]], k: int, recall_queries: int
+) -> None:
+    print("\nSummary")
+    header = (
+        f"{'ef':>6} {'base_qps':>10} {'vf_qps':>10} {'vf/base':>8} "
+        f"{'overlap':>8}"
+    )
+    if recall_queries > 0:
+        header += f" {'base_r@' + str(k):>10} {'vf_r@' + str(k):>10}"
+    print(header)
+
+    for comparison in comparisons:
+        row = (
+            f"{comparison['ef']:>6} "
+            f"{comparison['baseline']['qps']:>10.0f} "
+            f"{comparison['vf']['qps']:>10.0f} "
+            f"{comparison['vf_time_ratio']:>8.3f} "
+            f"{comparison['overlap']:>8.4f}"
+        )
+        if recall_queries > 0:
+            row += (
+                f" {comparison['baseline_recall']:>10.4f}"
+                f" {comparison['vf_recall']:>10.4f}"
+            )
+        print(row)
+
+
+def build_log_file_path(
+    dim: int, total_elements: int, threads: int, data_path: str
+) -> str:
+    dataset_tag = os.path.splitext(os.path.basename(data_path))[0]
+    dataset_tag = dataset_tag.replace(" ", "_")
+    return f"benchmarks/benchmark_{dataset_tag}_dim{dim}_n{total_elements}_t{threads}.csv"
+
+
+def append_results(
+    log_file: str,
+    data_path: str,
+    train_size: int,
+    test_size: int,
+    m: int,
+    ef_construction: int,
+    build_time: float,
+    comparisons: List[Dict[str, object]],
+    recall_queries: int,
+) -> None:
+    with open(log_file, "a", encoding="utf-8") as handle:
+        for comparison in comparisons:
+            for mode_key in ("baseline", "vf"):
+                metrics = comparison[mode_key]
+                recall_value = ""
+                if recall_queries > 0:
+                    recall_value = (
+                        comparison["baseline_recall"]
+                        if mode_key == "baseline"
+                        else comparison["vf_recall"]
+                    )
+                handle.write(
+                    f"{os.path.basename(data_path)},{train_size},{test_size},"
+                    f"{metrics['mode']},{m},{ef_construction},{comparison['ef']},"
+                    f"{build_time:.3f},{metrics['qps']:.0f},{metrics['latency_ms']:.3f},"
+                    f"{comparison['overlap']:.4f},{recall_value}\n"
+                )
+
+
 def main() -> None:
     parser = argparse.ArgumentParser(description="HNSW vs VF-HNSW performance benchmark")
     parser.add_argument("--dim", type=int, required=True, help="Vector dimension")
@@ -145,6 +250,13 @@ def main() -> None:
     parser.add_argument("--M", type=int, default=16, help="HNSW M parameter")
     parser.add_argument("--ef_construction", type=int, default=200)
     parser.add_argument("--ef_search", type=int, default=50)
+    parser.add_argument(
+        "--ef_values",
+        type=int,
+        nargs="+",
+        default=None,
+        help="Optional ef sweep. If provided, the index is built once and searched for each ef value.",
+    )
     parser.add_argument("--k", type=int, default=10, help="Top-k results to return")
     parser.add_argument("--warmup", type=int, default=1, help="Warmup iterations")
     parser.add_argument(
@@ -159,21 +271,36 @@ def main() -> None:
     parser.add_argument(
         "--data_path", type=str, default=None, help="Path to pre-generated embeddings"
     )
+    parser.add_argument(
+        "--log_file",
+        type=str,
+        default=None,
+        help="Optional CSV output path. Defaults to a dataset-specific file name.",
+    )
     args = parser.parse_args()
 
     if args.data_path is None:
-        args.data_path = f"random_data_{args.num_elements}_{args.dim}.npy"
+        args.data_path = f"data/random_data_{args.num_elements}_{args.dim}.npy"
 
     train_data, test_data = load_or_generate_data(
         args.num_elements, args.dim, args.data_path
     )
+    ef_values = normalize_ef_values(args.ef_values, args.ef_search)
 
     print(f"\n{'=' * 60}")
     print("HNSW Benchmark - baseline vs VF-HNSW")
     print(f"{'=' * 60}")
+    print(f"Data path: {args.data_path}")
     print(f"Dataset: {len(train_data)} train, {len(test_data)} test")
     print(f"Dimension: {args.dim}")
-    print(f"M={args.M}, ef_construction={args.ef_construction}, ef_search={args.ef_search}")
+    if len(ef_values) == 1:
+        print(
+            f"M={args.M}, ef_construction={args.ef_construction}, ef_search={ef_values[0]}"
+        )
+    else:
+        print(
+            f"M={args.M}, ef_construction={args.ef_construction}, ef_values={ef_values}"
+        )
     print(f"Threads: {args.threads}, k={args.k}")
 
     index = hnswlib.Index(space="l2", dim=args.dim)
@@ -185,52 +312,72 @@ def main() -> None:
     build_time = benchmark_build(index, train_data, args.threads)
     print(f"Build time: {build_time:.2f}s ({len(train_data) / build_time:.0f} vectors/s)")
 
-    print(f"\nSearching {len(test_data)} queries...")
-    baseline = benchmark_search(
-        index,
-        test_data,
-        k=args.k,
-        ef=args.ef_search,
-        threads=args.threads,
-        mode="standard",
-        warmup=args.warmup,
-        iterations=args.iterations,
-    )
-    vf = benchmark_search(
-        index,
-        test_data,
-        k=args.k,
-        ef=args.ef_search,
-        threads=args.threads,
-        mode="vf_hnsw",
-        warmup=args.warmup,
-        iterations=args.iterations,
-    )
-
-    summarize_mode("Baseline HNSW", baseline)
-    summarize_mode("VF-HNSW", vf)
-
-    overlap = overlap_at_k(baseline["labels"], vf["labels"])
-    print(f"\nResult overlap@{args.k}: {overlap:.4f}")
-    print(f"VF time ratio vs baseline: {vf['mean_time'] / baseline['mean_time']:.3f}x")
-
     recall_queries = min(args.recall_queries, len(test_data))
+    exact_labels = None
     if recall_queries > 0:
         sample_queries = test_data[:recall_queries]
+        print(f"\nComputing exact recall baseline on {recall_queries} queries...")
         exact_labels = exact_knn_l2(train_data, sample_queries, args.k)
-        baseline_recall = recall_at_k(baseline["labels"][:recall_queries], exact_labels)
-        vf_recall = recall_at_k(vf["labels"][:recall_queries], exact_labels)
-        print(f"Baseline recall@{args.k} on {recall_queries} exact queries: {baseline_recall:.4f}")
-        print(f"VF-HNSW recall@{args.k} on {recall_queries} exact queries: {vf_recall:.4f}")
 
-    log_file = f"benchmark_dim{args.dim}_n{args.num_elements}_t{args.threads}.csv"
-    with open(log_file, "a", encoding="utf-8") as handle:
-        for metrics in (baseline, vf):
-            handle.write(
-                f"{metrics['mode']},{args.M},{args.ef_construction},{args.ef_search},"
-                f"{build_time:.3f},{metrics['qps']:.0f},{metrics['latency_ms']:.3f},"
-                f"{overlap:.4f}\n"
+    print(f"\nSearching {len(test_data)} queries...")
+    comparisons = []
+    for ef in ef_values:
+        baseline = benchmark_search(
+            index,
+            test_data,
+            k=args.k,
+            ef=ef,
+            threads=args.threads,
+            mode="standard",
+            warmup=args.warmup,
+            iterations=args.iterations,
+        )
+        vf = benchmark_search(
+            index,
+            test_data,
+            k=args.k,
+            ef=ef,
+            threads=args.threads,
+            mode="vf_hnsw",
+            warmup=args.warmup,
+            iterations=args.iterations,
+        )
+
+        comparison = {
+            "ef": ef,
+            "baseline": baseline,
+            "vf": vf,
+            "overlap": overlap_at_k(baseline["labels"], vf["labels"]),
+            "vf_time_ratio": vf["mean_time"] / baseline["mean_time"],
+        }
+        if exact_labels is not None:
+            comparison["baseline_recall"] = recall_at_k(
+                baseline["labels"][:recall_queries], exact_labels
             )
+            comparison["vf_recall"] = recall_at_k(
+                vf["labels"][:recall_queries], exact_labels
+            )
+
+        summarize_comparison(ef, comparison, args.k, recall_queries)
+        comparisons.append(comparison)
+
+    if len(comparisons) > 1:
+        summarize_frontier_table(comparisons, args.k, recall_queries)
+
+    log_file = args.log_file or build_log_file_path(
+        args.dim, len(train_data) + len(test_data), args.threads, args.data_path
+    )
+    append_results(
+        log_file=log_file,
+        data_path=args.data_path,
+        train_size=len(train_data),
+        test_size=len(test_data),
+        m=args.M,
+        ef_construction=args.ef_construction,
+        build_time=build_time,
+        comparisons=comparisons,
+        recall_queries=recall_queries,
+    )
 
     print(f"\nResults appended to {log_file}")
 
