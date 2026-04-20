@@ -1,10 +1,12 @@
 import argparse
 import os
 import time
+from pathlib import Path
 from typing import Dict, List, Optional, Tuple
 
 import h5py
 import hnswlib
+import matplotlib.pyplot as plt
 import numpy as np
 
 
@@ -13,15 +15,15 @@ def load_hdf5_data(
 ) -> Tuple[np.ndarray, np.ndarray]:
     """Load train/test vectors from HDF5 file (e.g., ann-benchmarks format)."""
     print(f"Loading HDF5 data from {data_path}")
-    with h5py.File(data_path, 'r') as f:
+    with h5py.File(data_path, "r") as f:
         # ann-benchmarks format has 'train', 'test', and 'distances' keys
-        train_data = f['train'][:]
-        test_data = f['test'][:]
-        
+        train_data = f["train"][:]
+        test_data = f["test"][:]
+
         if num_elements is not None and num_elements < len(train_data):
             print(f"Truncating train data from {len(train_data)} to {num_elements}")
             train_data = train_data[:num_elements]
-    
+
     return train_data.astype(np.float32), test_data.astype(np.float32)
 
 
@@ -29,9 +31,9 @@ def load_or_generate_data(
     num_elements: int, dim: int, data_path: str
 ) -> Tuple[np.ndarray, np.ndarray]:
     """Load or generate train/test vectors."""
-    if data_path.endswith('.hdf5') or data_path.endswith('.h5'):
+    if data_path.endswith(".hdf5") or data_path.endswith(".h5"):
         return load_hdf5_data(data_path, num_elements)
-    
+
     if os.path.exists(data_path):
         print(f"Loading data from {data_path}")
         data = np.load(data_path)
@@ -57,7 +59,9 @@ def overlap_at_k(lhs: np.ndarray, rhs: np.ndarray) -> float:
     """Average set overlap between two result matrices."""
     per_query = []
     for lhs_row, rhs_row in zip(lhs, rhs):
-        per_query.append(len(set(lhs_row.tolist()) & set(rhs_row.tolist())) / lhs.shape[1])
+        per_query.append(
+            len(set(lhs_row.tolist()) & set(rhs_row.tolist())) / lhs.shape[1]
+        )
     return float(np.mean(per_query))
 
 
@@ -73,9 +77,7 @@ def exact_knn_l2(
         chunk = train_data[start : start + chunk_size]
         chunk_norms = np.sum(chunk * chunk, axis=1, dtype=np.float32)
         distances = (
-            query_norms[:, None]
-            + chunk_norms[None, :]
-            - 2.0 * queries @ chunk.T
+            query_norms[:, None] + chunk_norms[None, :] - 2.0 * queries @ chunk.T
         )
         distances = np.maximum(distances, 0.0)
         labels = np.arange(start, start + len(chunk), dtype=np.int64)
@@ -99,13 +101,13 @@ def recall_at_k(predicted_labels: np.ndarray, exact_labels: np.ndarray) -> float
     """Average recall@k for two result matrices."""
     per_query = []
     for predicted, exact in zip(predicted_labels, exact_labels):
-        per_query.append(len(set(predicted.tolist()) & set(exact.tolist())) / exact.shape[0])
+        per_query.append(
+            len(set(predicted.tolist()) & set(exact.tolist())) / exact.shape[0]
+        )
     return float(np.mean(per_query))
 
 
-def normalize_ef_values(
-    ef_values: Optional[List[int]], fallback_ef: int
-) -> List[int]:
+def normalize_ef_values(ef_values: Optional[List[int]], fallback_ef: int) -> List[int]:
     """Normalize ef inputs while preserving order."""
     values = ef_values if ef_values is not None else [fallback_ef]
     normalized = []
@@ -195,13 +197,59 @@ def summarize_comparison(
         )
 
 
+def generate_qps_frontier_chart(
+    comparisons: List[Dict], k: int, chart_dir: str = "charts"
+):
+    """
+    Create a line chart:  x = ef value,  y = QPS.
+    Two lines are drawn:  baseline (standard) and vf (vf_hnsw).
+
+    The chart is saved as ``<benchmark_name>.png`` inside ``chart_dir``.
+    """
+    # ------------------------------------------------------------------
+    # Prepare data
+    # ------------------------------------------------------------------
+    ef_values = sorted({c["ef"] for c in comparisons})
+    baseline_qps = []
+    vf_qps = []
+
+    for ef in ef_values:
+        # Find the comparison entry that contains this ef
+        entry = next(c for c in comparisons if c["ef"] == ef)
+        baseline_qps.append(entry["baseline"]["qps"])
+        vf_qps.append(entry["vf"]["qps"])
+
+    # ------------------------------------------------------------------
+    # Build a readable benchmark name
+    # ------------------------------------------------------------------
+    benchmark_tag = f"ef{'_'.join(map(str, ef_values))}_k{k}"
+    out_path = Path(chart_dir) / f"{benchmark_tag}.png"
+    out_path.parent.mkdir(parents=True, exist_ok=True)
+
+    # ------------------------------------------------------------------
+    # Plot
+    # ------------------------------------------------------------------
+    plt.figure(figsize=(8, 5))
+    plt.plot(ef_values, baseline_qps, marker="o", label=f"Baseline (k={k})")
+    plt.plot(ef_values, vf_qps, marker="s", label=f"VF‑HNSW (k={k})")
+    plt.title(f"QPS vs. ef (search mode = k={k})")
+    plt.xlabel("ef (search parameter)")
+    plt.ylabel("Queries per second (QPS)")
+    plt.grid(True, which="both", ls=":", alpha=0.6)
+    plt.legend()
+    plt.tight_layout()
+    plt.savefig(out_path, dpi=150)
+    plt.close()
+
+    return str(out_path)
+
+
 def summarize_frontier_table(
     comparisons: List[Dict[str, object]], k: int, recall_queries: int
 ) -> None:
     print("\nSummary")
     header = (
-        f"{'ef':>6} {'base_qps':>10} {'vf_qps':>10} {'vf/base':>8} "
-        f"{'overlap':>8}"
+        f"{'ef':>6} {'base_qps':>10} {'vf_qps':>10} {'vf/base':>8} " f"{'overlap':>8}"
     )
     if recall_queries > 0:
         header += f" {'base_r@' + str(k):>10} {'vf_r@' + str(k):>10}"
@@ -228,7 +276,9 @@ def build_log_file_path(
 ) -> str:
     dataset_tag = os.path.splitext(os.path.basename(data_path))[0]
     dataset_tag = dataset_tag.replace(" ", "_")
-    return f"benchmarks/benchmark_{dataset_tag}_dim{dim}_n{total_elements}_t{threads}.csv"
+    return (
+        f"benchmarks/benchmark_{dataset_tag}_dim{dim}_n{total_elements}_t{threads}.csv"
+    )
 
 
 def append_results(
@@ -263,10 +313,20 @@ def append_results(
 
 
 def main() -> None:
-    parser = argparse.ArgumentParser(description="HNSW vs VF-HNSW performance benchmark")
-    parser.add_argument("--dim", type=int, default=None, help="Vector dimension (auto-detected for HDF5)")
+    parser = argparse.ArgumentParser(
+        description="HNSW vs VF-HNSW performance benchmark"
+    )
     parser.add_argument(
-        "--num_elements", type=int, default=None, help="Number of vectors (use all if not specified for HDF5)"
+        "--dim",
+        type=int,
+        default=None,
+        help="Vector dimension (auto-detected for HDF5)",
+    )
+    parser.add_argument(
+        "--num_elements",
+        type=int,
+        default=None,
+        help="Number of vectors (use all if not specified for HDF5)",
     )
     parser.add_argument("--threads", type=int, default=4, help="Number of threads")
     parser.add_argument("--M", type=int, default=16, help="HNSW M parameter")
@@ -291,7 +351,10 @@ def main() -> None:
         help="Queries sampled for exact recall@k",
     )
     parser.add_argument(
-        "--data_path", type=str, default="data/mnist-784-euclidean.hdf5", help="Path to HDF5 or numpy embeddings"
+        "--data_path",
+        type=str,
+        default="data/mnist-784-euclidean.hdf5",
+        help="Path to HDF5 or numpy embeddings",
     )
     parser.add_argument(
         "--log_file",
@@ -302,13 +365,15 @@ def main() -> None:
     args = parser.parse_args()
 
     # Auto-detect dimension from HDF5 if needed
-    if args.data_path.endswith('.hdf5') or args.data_path.endswith('.h5'):
-        with h5py.File(args.data_path, 'r') as f:
-            detected_dim = f['train'].shape[1]
+    if args.data_path.endswith(".hdf5") or args.data_path.endswith(".h5"):
+        with h5py.File(args.data_path, "r") as f:
+            detected_dim = f["train"].shape[1]
             if args.dim is None:
                 args.dim = detected_dim
             elif args.dim != detected_dim:
-                raise ValueError(f"Specified dim={args.dim} doesn't match HDF5 dimension {detected_dim}")
+                raise ValueError(
+                    f"Specified dim={args.dim} doesn't match HDF5 dimension {detected_dim}"
+                )
 
     if args.dim is None:
         raise ValueError("--dim is required for non-HDF5 datasets")
@@ -341,7 +406,9 @@ def main() -> None:
 
     print("\nBuilding index...")
     build_time = benchmark_build(index, train_data, args.threads)
-    print(f"Build time: {build_time:.2f}s ({len(train_data) / build_time:.0f} vectors/s)")
+    print(
+        f"Build time: {build_time:.2f}s ({len(train_data) / build_time:.0f} vectors/s)"
+    )
 
     recall_queries = min(args.recall_queries, len(test_data))
     exact_labels = None
@@ -411,6 +478,9 @@ def main() -> None:
     )
 
     print(f"\nResults appended to {log_file}")
+
+    chart_file = generate_qps_frontier_chart(comparisons, k=args.k)
+    print(f"Chart saved to: {chart_file}")
 
 
 if __name__ == "__main__":
