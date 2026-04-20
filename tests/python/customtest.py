@@ -3,14 +3,35 @@ import os
 import time
 from typing import Dict, List, Optional, Tuple
 
+import h5py
 import hnswlib
 import numpy as np
+
+
+def load_hdf5_data(
+    data_path: str, num_elements: Optional[int] = None
+) -> Tuple[np.ndarray, np.ndarray]:
+    """Load train/test vectors from HDF5 file (e.g., ann-benchmarks format)."""
+    print(f"Loading HDF5 data from {data_path}")
+    with h5py.File(data_path, 'r') as f:
+        # ann-benchmarks format has 'train', 'test', and 'distances' keys
+        train_data = f['train'][:]
+        test_data = f['test'][:]
+        
+        if num_elements is not None and num_elements < len(train_data):
+            print(f"Truncating train data from {len(train_data)} to {num_elements}")
+            train_data = train_data[:num_elements]
+    
+    return train_data.astype(np.float32), test_data.astype(np.float32)
 
 
 def load_or_generate_data(
     num_elements: int, dim: int, data_path: str
 ) -> Tuple[np.ndarray, np.ndarray]:
     """Load or generate train/test vectors."""
+    if data_path.endswith('.hdf5') or data_path.endswith('.h5'):
+        return load_hdf5_data(data_path, num_elements)
+    
     if os.path.exists(data_path):
         print(f"Loading data from {data_path}")
         data = np.load(data_path)
@@ -221,6 +242,7 @@ def append_results(
     comparisons: List[Dict[str, object]],
     recall_queries: int,
 ) -> None:
+    os.makedirs(os.path.dirname(log_file), exist_ok=True)
     with open(log_file, "a", encoding="utf-8") as handle:
         for comparison in comparisons:
             for mode_key in ("baseline", "vf"):
@@ -242,9 +264,9 @@ def append_results(
 
 def main() -> None:
     parser = argparse.ArgumentParser(description="HNSW vs VF-HNSW performance benchmark")
-    parser.add_argument("--dim", type=int, required=True, help="Vector dimension")
+    parser.add_argument("--dim", type=int, default=None, help="Vector dimension (auto-detected for HDF5)")
     parser.add_argument(
-        "--num_elements", type=int, default=100000, help="Number of vectors"
+        "--num_elements", type=int, default=None, help="Number of vectors (use all if not specified for HDF5)"
     )
     parser.add_argument("--threads", type=int, default=4, help="Number of threads")
     parser.add_argument("--M", type=int, default=16, help="HNSW M parameter")
@@ -269,7 +291,7 @@ def main() -> None:
         help="Queries sampled for exact recall@k",
     )
     parser.add_argument(
-        "--data_path", type=str, default=None, help="Path to pre-generated embeddings"
+        "--data_path", type=str, default="data/mnist-784-euclidean.hdf5", help="Path to HDF5 or numpy embeddings"
     )
     parser.add_argument(
         "--log_file",
@@ -279,11 +301,20 @@ def main() -> None:
     )
     args = parser.parse_args()
 
-    if args.data_path is None:
-        args.data_path = f"data/random_data_{args.num_elements}_{args.dim}.npy"
+    # Auto-detect dimension from HDF5 if needed
+    if args.data_path.endswith('.hdf5') or args.data_path.endswith('.h5'):
+        with h5py.File(args.data_path, 'r') as f:
+            detected_dim = f['train'].shape[1]
+            if args.dim is None:
+                args.dim = detected_dim
+            elif args.dim != detected_dim:
+                raise ValueError(f"Specified dim={args.dim} doesn't match HDF5 dimension {detected_dim}")
+
+    if args.dim is None:
+        raise ValueError("--dim is required for non-HDF5 datasets")
 
     train_data, test_data = load_or_generate_data(
-        args.num_elements, args.dim, args.data_path
+        args.num_elements or 100000, args.dim, args.data_path
     )
     ef_values = normalize_ef_values(args.ef_values, args.ef_search)
 
@@ -384,3 +415,4 @@ def main() -> None:
 
 if __name__ == "__main__":
     main()
+    
