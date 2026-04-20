@@ -8,10 +8,8 @@ cd build && cmake .. && cd .. && uv pip install -e .
 uv run tests/python/customtest.py \
 --threads 8 \
 --ef_values 10 20 50 100 \
---iterations 1 \
---warmup 0 \
+--iterations 5 \
+--warmup 1 \
 --recall_queries 200 \
 --data_path data/mnist-784-euclidean.hdf5
 ```
-
-
