@@ -1,0 +1,67 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8"/>
+<meta name="viewport" content="width=device-width,initial-scale=1"/>
+<title>Distance Spaces — L2, IP, Cosine without NumPy</title>
+<link rel="stylesheet" href="../assets/style.css"/>
+<script src="../assets/quiz.js" defer></script>
+</head>
+<body>
+<div class="meta"><a href="../MISSION.md">MISSION</a> · <a href="../RESOURCES.md">Resources</a> · <a href="../reference/glossary.md">Glossary</a></div>
+<h1>Distance Spaces — L2, IP, Cosine without NumPy</h1>
+<p>*Lesson 01 · 90 min · reference/distance-spaces.md · spaces.py*</p>
+<p>*You cannot search without a metric. Build three spaces by hand and learn why IP is not a metric.*</p>
+<blockquote>Primary sources: [Malkov & Yashunin 2018 §3-4](https://arxiv.org/abs/1603.09320) · `hnswlib/hnswalg.h:34-144` · `reference/` docs. Ask your teacher with follow-ups.</blockquote>
+<h2>Why this matters</h2>
+<p>HNSW is metric-agnostic, but the `Space` you plug in determines what "nearest" means. `README.md:51-53` defines three; your `src/spaces.py` will expose `dist(a,b)`. All later recall numbers depend on this being correct.</p>
+<h2>Study (15 min)</h2>
+<li>`reference/distance-spaces.md` — contracts.</li>
+<li>`hnswlib/space_l2.h:1-40` and `space_ip.h:1-40` — how hnswlib binds `fstdistfunc_` (`hnswalg.h:56`).</li>
+<h2>Build</h2>
+<h3>Task 1 — Implement</h3>
+<p>In `src/spaces.py`:</p>
+<pre><code>import math
+
+class L2Space:
+    name="l2"
+    def dist(self, a, b):
+        return math.fsum((x-y)*(x-y) for x,y in zip(a,b))  # squared L2
+
+class IPSpace:
+    name="ip"
+    def dist(self, a, b):
+        return 1.0 - math.fsum(x*y for x,y in zip(a,b))
+
+class CosineSpace:
+    name="cosine"
+    def dist(self, a, b):
+        dot = math.fsum(x*y for x,y in zip(a,b))
+        na = math.sqrt(math.fsum(x*x for x in a))
+        nb = math.sqrt(math.fsum(x*x for x in b))
+        if na==0 or nb==0: return 1.0
+        return 1.0 - dot/(na*nb)
+</code></pre>
+<p>Bind locally in callers: `d = space.dist`.</p>
+<h3>Task 2 — Verify</h3>
+<li>Unit: `dist([0,0],[3,4])` → 25 (squared). `IP dist([1,0],[1,0])` → 0. `Cosine` of orthogonal → 1.0.</li>
+<li>Brute check: 20 random 8-d vecs, compare L2 to manual loop and `math.dist` (Python 3.8+) if available.</li>
+<h2>Retrie val — Quiz</h2>
+<div class="quiz" data-answer="B">
+<p><strong>Which statement is true?</strong></p>
+<button data-choice="A">Cosine distance is a metric and obeys triangle inequality</button>
+<button data-choice="B">IP with `1-dot` is not a metric; a point can be closer to another than itself</button>
+<button data-choice="C">Squared L2 and rooted L2 give different nearest-neighbor ordering</button>
+<p class="feedback" data-ok="README.md:54 notes IP non-metric." data-no="Re-read reference/distance-spaces.md pitfalls."></p>
+</div>
+<h2>Exercise (in-browser mental)</h2>
+<p>Compute by hand: `a=[1,2], b=[4,6]` → L2²=?, cosine=? Then run your code to confirm.</p>
+<h2>Next</h2>
+<p>Lesson 02 builds NSW graph on top of this `Space`. Ask your teacher about any dist mismatch.</p>
+<hr/>
+<p>**Links:** [Reference docs](../reference/) · [Glossary](../reference/glossary.md) · [MISSION](../MISSION.md) · Next lesson in `lessons/`</p>
+
+<nav class="nav"><a href="#">← Prev</a><a href="#">Next →</a></nav>
+<p class="meta">Print friendly · Ask your teacher for follow-ups.</p>
+</body>
+</html>

@@ -1,5 +1,19 @@
-# Hnswlib - fast approximate nearest neighbor search
-Header-only C++ HNSW implementation with python bindings, insertions and updates.
+# Hnswlib Learn
+> Header-only C++ HNSW implementation with python bindings, insertions and updates — now with a pure-Python teaching workspace to build HNSW from scratch.
+
+## Learn HNSW from scratch (pure Python, stdlib-only)
+
+New in this fork: [`teaching/`](./teaching/) — a self-contained course to rebuild HNSW without NumPy or C++. 11 lessons (each as `.md` + printable `.html`), reference docs, and a working `src/` skeleton.
+
+- **Path:** `teaching/lessons/0001-distance-spaces.md` → `0011-real-data-validation.md` (start at 0001)
+- **Workspace docs:** [`teaching/MISSION.md`](./teaching/MISSION.md) · [`teaching/RESOURCES.md`](./teaching/RESOURCES.md) · [`teaching/reference/glossary.md`](./teaching/reference/glossary.md)
+- **Reference impl here:** `hnswlib/hnswalg.h:34-144`, `space_l2.h`, `space_ip.h`; params in `ALGO_PARAMS.md:1`
+- **Constraints:** stdlib only in `src/` (`math`, `random`, `heapq`, `array`, `struct`); no NumPy; heuristic deep-dive split across 0005/0006; no threading; validate on real data you download (fvecs/bvecs via `teaching/src/datasets.py`)
+- **Run tests:** `python -m tests.test_spaces && python -m tests.test_hnsw` from `teaching/`
+- **Reference paper:** [Malkov & Yashunin 2018 §3-4](https://arxiv.org/abs/1603.09320)
+- **Teaching framework:** workspace scaffolded with [Matt Pocock's `teach` skill](https://github.com/mattpocock/total-typescript) (`~/.agents/skills/teach/SKILL.md` — MISSION/RESOURCES/learning-records/lessons/reference/assets pattern)
+
+The original C++ library and bindings below are unchanged — use them as oracle and benchmark.
 
 **NEWS:**
 

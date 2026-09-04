@@ -1,0 +1,48 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8"/>
+<meta name="viewport" content="width=device-width,initial-scale=1"/>
+<title>Persistence — Save / Load (struct + array)</title>
+<link rel="stylesheet" href="../assets/style.css"/>
+<script src="../assets/quiz.js" defer></script>
+</head>
+<body>
+<div class="meta"><a href="../MISSION.md">MISSION</a> · <a href="../RESOURCES.md">Resources</a> · <a href="../reference/glossary.md">Glossary</a></div>
+<h1>Persistence — Save / Load (struct + array)</h1>
+<p>*Lesson 09 · 90 min · reference/persistence-format.md · persistence.py*</p>
+<p>*One binary file, little-endian, versioned — no pickle for vectors.*</p>
+<blockquote>Primary sources: [Malkov & Yashunin 2018 §3-4](https://arxiv.org/abs/1603.09320) · `hnswlib/hnswalg.h:34-144` · `reference/` docs. Ask your teacher with follow-ups.</blockquote>
+<h2>Study</h2>
+<li>`reference/persistence-format.md` header + per-element layout.</li>
+<li>`hnswalg.h:loadIndex` / `saveIndex` order.</li>
+<h2>Build</h2>
+<p>`src/persistence.py`:</p>
+<pre><code>import struct, array
+MAGIC=b'HNSW'; VERSION=1
+def save(hnsw, path):
+    with open(path,'wb') as f:
+        f.write(struct.pack('&lt;4sHHHIh8s', MAGIC, VERSION, hnsw.M, len(hnsw.data[0]) if hnsw.data else 0, len(hnsw.data), hnsw.maxlevel, hnsw.space.name.encode().ljust(8,b'\x00')))
+        for i, vec in enumerate(hnsw.data):
+            lvl=hnsw.levels[i]; a=array.array('f', vec); f.write(struct.pack('&lt;b i b', lvl, i, 0)); a.tofile(f)
+            for lc in range(lvl+1):
+                arr=hnsw.links[i][lc]; f.write(struct.pack('&lt;H', len(arr))); arr.tofile(f)
+</code></pre>
+<p>Load reverses, rebuilds `enterpoint`.</p>
+<h2>Verify</h2>
+<p>Save → load → identical `knn_query` results for 20 random queries; bit-identical recall.</p>
+<h2>Quiz</h2>
+<div class="quiz" data-answer="B">
+<p><strong>Persistence must?</strong></p>
+<button data-choice="A">Pickle entire object is fine for vectors</button>
+<button data-choice="B">Struct header + array tofile, versioned, little-endian</button>
+<button data-choice="C">JSON vectors + text links</button>
+<p class="feedback" data-ok="Per reference/persistence-format.md." data-no="See persistence ref."></p>
+</div>
+<hr/>
+<p>**Links:** [Reference docs](../reference/) · [Glossary](../reference/glossary.md) · [MISSION](../MISSION.md) · Next lesson in `lessons/`</p>
+
+<nav class="nav"><a href="#">← Prev</a><a href="#">Next →</a></nav>
+<p class="meta">Print friendly · Ask your teacher for follow-ups.</p>
+</body>
+</html>

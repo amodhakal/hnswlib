@@ -1,0 +1,41 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8"/>
+<meta name="viewport" content="width=device-width,initial-scale=1"/>
+<title>Memory & Speed — Pure-Python Tricks</title>
+<link rel="stylesheet" href="../assets/style.css"/>
+<script src="../assets/quiz.js" defer></script>
+</head>
+<body>
+<div class="meta"><a href="../MISSION.md">MISSION</a> · <a href="../RESOURCES.md">Resources</a> · <a href="../reference/glossary.md">Glossary</a></div>
+<h1>Memory & Speed — Pure-Python Tricks</h1>
+<p>*Lesson 08 · 90 min · hnswalg.h:120-123 layout · __slots__, array, locals*</p>
+<p>*No NumPy, so squeeze Python: contiguous arrays, slots, local binding.*</p>
+<blockquote>Primary sources: [Malkov & Yashunin 2018 §3-4](https://arxiv.org/abs/1603.09320) · `hnswlib/hnswalg.h:34-144` · `reference/` docs. Ask your teacher with follow-ups.</blockquote>
+<h2>Study</h2>
+<li>`hnswalg.h:120-123` contiguous `data_level0_memory_` layout inspiration.</li>
+<li>`visited_list_pool.h` pooling idea.</li>
+<h2>Build</h2>
+<li>Store links as `list[list[array('I')]]` not `list[list[list[int]]]`.</li>
+<li>Add `__slots__ = ('M','maxM','maxM0','mult','levels','data','links','enterpoint','maxlevel','space','ef_construction')` to `HNSW`.</li>
+<li>In hot loops: `dist=space.dist; data=self.data; links=self.links` local alias.</li>
+<li>Visited: reuse `bytearray` epoch tag (int array + cur_epoch) instead of fresh alloc.</li>
+<li>Prealloc `self.data` if `max_elements` known.</li>
+<h2>Measure</h2>
+<p>`time.perf_counter` around 500 queries before/after — report QPS delta in `NOTES.md`. Expect 10-20% gain from locals + bytearray reuse.</p>
+<h2>Quiz</h2>
+<div class="quiz" data-answer="A">
+<p><strong>Best pure-Python win?</strong></p>
+<button data-choice="A">Local variable binding + array('I') + bytearray pool</button>
+<button data-choice="B">Using set for visited</button>
+<button data-choice="C">Recursive search_layer</button>
+<p class="feedback" data-ok="Profile then fix." data-no="Check optimization ref."></p>
+</div>
+<hr/>
+<p>**Links:** [Reference docs](../reference/) · [Glossary](../reference/glossary.md) · [MISSION](../MISSION.md) · Next lesson in `lessons/`</p>
+
+<nav class="nav"><a href="#">← Prev</a><a href="#">Next →</a></nav>
+<p class="meta">Print friendly · Ask your teacher for follow-ups.</p>
+</body>
+</html>

@@ -1,0 +1,40 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8"/>
+<meta name="viewport" content="width=device-width,initial-scale=1"/>
+<title>Updates & Deletions — Tombstones & Replace</title>
+<link rel="stylesheet" href="../assets/style.css"/>
+<script src="../assets/quiz.js" defer></script>
+</head>
+<body>
+<div class="meta"><a href="../MISSION.md">MISSION</a> · <a href="../RESOURCES.md">Resources</a> · <a href="../reference/glossary.md">Glossary</a></div>
+<h1>Updates & Deletions — Tombstones & Replace</h1>
+<p>*Lesson 10 · 90 min · visited_list_pool / deleted handling · hnsw.py*</p>
+<p>*Mark-deleted, skip in search, optionally reuse slot.*</p>
+<blockquote>Primary sources: [Malkov & Yashunin 2018 §3-4](https://arxiv.org/abs/1603.09320) · `hnswlib/hnswalg.h:34-144` · `reference/` docs. Ask your teacher with follow-ups.</blockquote>
+<h2>Study</h2>
+<li>`hnswalg.h:DELETE_MARK`, `deleted_elements` set, `allow_replace_deleted_`.</li>
+<h2>Build</h2>
+<li>`self.deleted = bytearray(max_elements)` or `set()`.</li>
+<li>`mark_deleted(label_or_id)`: set flag, `num_deleted+=1`; search skips `if deleted[cid]` but still traverses graph.</li>
+<li>`unmark_deleted`, `replace_deleted(vec, deleted_id)` reuses slot (keep links, re-insert).</li>
+<li>`resize_index(new_max)` realloc `levels`, `deleted`.</li>
+<p>Search change: filter `best` before returning top k; if insufficient non-deleted, return whatever found.</p>
+<h2>Verify</h2>
+<p>Insert 200, delete 20 random, query — deleted never appears. Replace 10 — recall restored.</p>
+<h2>Quiz</h2>
+<div class="quiz" data-answer="A">
+<p><strong>Deleted node during search?</strong></p>
+<button data-choice="A">Traversed but not returned; best still needs filtering</button>
+<button data-choice="B">Removed from graph immediately</button>
+<button data-choice="C">Ignored completely, links deleted</button>
+<p class="feedback" data-ok="Tombstone pattern." data-no="See lesson body."></p>
+</div>
+<hr/>
+<p>**Links:** [Reference docs](../reference/) · [Glossary](../reference/glossary.md) · [MISSION](../MISSION.md) · Next lesson in `lessons/`</p>
+
+<nav class="nav"><a href="#">← Prev</a><a href="#">Next →</a></nav>
+<p class="meta">Print friendly · Ask your teacher for follow-ups.</p>
+</body>
+</html>

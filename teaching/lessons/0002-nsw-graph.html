@@ -1,0 +1,58 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8"/>
+<meta name="viewport" content="width=device-width,initial-scale=1"/>
+<title>NSW — Single-Layer Graph & Greedy Search</title>
+<link rel="stylesheet" href="../assets/style.css"/>
+<script src="../assets/quiz.js" defer></script>
+</head>
+<body>
+<div class="meta"><a href="../MISSION.md">MISSION</a> · <a href="../RESOURCES.md">Resources</a> · <a href="../reference/glossary.md">Glossary</a></div>
+<h1>NSW — Single-Layer Graph & Greedy Search</h1>
+<p>*Lesson 02 · 120 min · reference/nsw-algorithm.md · graph.py*</p>
+<p>*One layer, greedy walk, candidate heap, visited bytearray — the engine of HNSW.*</p>
+<blockquote>Primary sources: [Malkov & Yashunin 2018 §3-4](https://arxiv.org/abs/1603.09320) · `hnswlib/hnswalg.h:34-144` · `reference/` docs. Ask your teacher with follow-ups.</blockquote>
+<h2>Why</h2>
+<p>HNSW layer 0 *is* NSW. Master `search_layer` here and every upper layer is the same call with smaller `ef`.</p>
+<h2>Study</h2>
+<li>`reference/nsw-algorithm.md` algorithm steps.</li>
+<li>`hnswlib/hnswalg.h` search inner loop (≈ line 300-450) — candidate heap as negated max-heap.</li>
+<h2>Build</h2>
+<h3>Task 1 — Graph store</h3>
+<p>`src/graph.py`:</p>
+<pre><code>import heapq, array
+class NSW:
+    def __init__(self, maxM=16): self.M=maxM; self.adj=[]; self.data=[]
+    def add_node(self, vec): self.adj.append(array.array('I')); self.data.append(vec); return len(self.data)-1
+</code></pre>
+<h3>Task 2 — search_layer</h3>
+<pre><code>def search_layer(self, q, entry, ef, level, space):
+    n=len(self.data)
+    visited=bytearray(n); visited[entry]=1
+    dist0=space.dist(self.data[entry], q)
+    cand=[(-dist0, entry)]; heapq.heapify(cand)  # max-heap via negation? use min-heap on -dist
+    # Better: use (-dist) max-heap or (dist) min-heap + separate nearest
+    best=[(dist0, entry)]
+    import heapq
+    # implement standard: candidates = [(dist, id)] min-heap, nearest = max-heap of size ef
+</code></pre>
+<p>Follow reference steps; trim `best` to `ef`. Use local `dist=space.dist`, `adj=self.adj`.</p>
+<h2>Quiz</h2>
+<div class="quiz" data-answer="C">
+<p><strong>Why bytearray over set for visited?</strong></p>
+<button data-choice="A">bytearray is a set</button>
+<button data-choice="B">set is faster for 10k nodes</button>
+<button data-choice="C">O(1) indexed, no hashing/allocation per query, poolable</button>
+<p class="feedback" data-ok="See visited_list_pool.h" data-no="Check reference/nsw-algorithm.md visited note."></p>
+</div>
+<h2>Verify</h2>
+<p>Build 200 random 2-d nodes, `maxM=6`, naive connect 6 nearest. Query 20 random vs brute — recall@5 should be high for this toy.</p>
+<p>Ask teacher: show your `search_layer` trace on 5-node graph.</p>
+<hr/>
+<p>**Links:** [Reference docs](../reference/) · [Glossary](../reference/glossary.md) · [MISSION](../MISSION.md) · Next lesson in `lessons/`</p>
+
+<nav class="nav"><a href="#">← Prev</a><a href="#">Next →</a></nav>
+<p class="meta">Print friendly · Ask your teacher for follow-ups.</p>
+</body>
+</html>

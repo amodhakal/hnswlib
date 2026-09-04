@@ -1,0 +1,45 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8"/>
+<meta name="viewport" content="width=device-width,initial-scale=1"/>
+<title>Neighbor Selection — Simple (Closest M)</title>
+<link rel="stylesheet" href="../assets/style.css"/>
+<script src="../assets/quiz.js" defer></script>
+</head>
+<body>
+<div class="meta"><a href="../MISSION.md">MISSION</a> · <a href="../RESOURCES.md">Resources</a> · <a href="../reference/glossary.md">Glossary</a></div>
+<h1>Neighbor Selection — Simple (Closest M)</h1>
+<p>*Lesson 05 · 90 min · reference/neighbor-heuristic-deep.md · heuristics.py*</p>
+<p>*Baseline: keep M closest. Easy, but clusters kill it.*</p>
+<blockquote>Primary sources: [Malkov & Yashunin 2018 §3-4](https://arxiv.org/abs/1603.09320) · `hnswlib/hnswalg.h:34-144` · `reference/` docs. Ask your teacher with follow-ups.</blockquote>
+<h2>Study</h2>
+<li>`reference/neighbor-heuristic-deep.md` Simple vs Heuristic.</li>
+<li>`hnswalg.h:selectNeighbors` `heuristic` flag off path.</li>
+<h2>Build</h2>
+<p>`src/heuristics.py`:</p>
+<pre><code>def select_simple(candidates, M):
+    # candidates: list of (dist, id)
+    candidates.sort()
+    return [cid for _,cid in candidates[:M]]
+</code></pre>
+<p>Use in `hnsw.py:select_neighbors(..., heuristic=False)`.</p>
+<h2>Exercise</h2>
+<p>Hand case: q=(0,0), a=(1,0.1), b=(1,-0.1), c=(10,0), M=2. Simple picks a,b (same direction); heuristic would keep a and c. Predict, then test.</p>
+<h2>Verify</h2>
+<p>On clustered 2-d data (3 clusters), simple recall@5 worse than heuristic (next lesson) — set up A/B.</p>
+<h2>Quiz</h2>
+<div class="quiz" data-answer="A">
+<p><strong>Simple selection needs?</strong></p>
+<button data-choice="A">Sort by dist(q,cand) and take M smallest</button>
+<button data-choice="B">Prune by dist(cand, kept)</button>
+<button data-choice="C">Random M candidates</button>
+<p class="feedback" data-ok="Baseline." data-no="See ref simple definition."></p>
+</div>
+<hr/>
+<p>**Links:** [Reference docs](../reference/) · [Glossary](../reference/glossary.md) · [MISSION](../MISSION.md) · Next lesson in `lessons/`</p>
+
+<nav class="nav"><a href="#">← Prev</a><a href="#">Next →</a></nav>
+<p class="meta">Print friendly · Ask your teacher for follow-ups.</p>
+</body>
+</html>

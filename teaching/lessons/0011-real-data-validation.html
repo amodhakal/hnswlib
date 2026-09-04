@@ -1,0 +1,47 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8"/>
+<meta name="viewport" content="width=device-width,initial-scale=1"/>
+<title>Real-Data Validation — Your Downloads, Brute-Force Truth</title>
+<link rel="stylesheet" href="../assets/style.css"/>
+<script src="../assets/quiz.js" defer></script>
+</head>
+<body>
+<div class="meta"><a href="../MISSION.md">MISSION</a> · <a href="../RESOURCES.md">Resources</a> · <a href="../reference/glossary.md">Glossary</a></div>
+<h1>Real-Data Validation — Your Downloads, Brute-Force Truth</h1>
+<p>*Lesson 11 · 90 min · reference/datasets.md · datasets.py + metrics.py*</p>
+<p>*No harness — you fetch SIFT/GloVe, we load with struct/array and compare to brute force.*</p>
+<blockquote>Primary sources: [Malkov & Yashunin 2018 §3-4](https://arxiv.org/abs/1603.09320) · `hnswlib/hnswalg.h:34-144` · `reference/` docs. Ask your teacher with follow-ups.</blockquote>
+<h2>Study</h2>
+<li>`reference/datasets.md` fvecs/bvecs/Glove loaders.</li>
+<li>`TESTING_RECALL.md` recall-vs-ef plotting pattern.</li>
+<h2>Build</h2>
+<p>`src/datasets.py` (stdlib only):</p>
+<li>`load_fvecs(path, limit)` as in reference.</li>
+<li>`src/metrics.py`: `recall_at_k(brute_ids, hnsw_ids, k)` and `time_qps`.</li>
+<p>Your own script (you run):</p>
+<pre><code>from src.hnsw import HNSW
+from src.spaces import L2Space
+from src.datasets import load_fvecs
+from src.metrics import recall_at_k
+import time
+
+base=load_fvecs('sift_base.fvecs', limit=10000)
+queries=load_fvecs('sift_query.fvecs', limit=100)
+# brute
+# build HNSW, time build, time queries at ef=10,50,100, table recall@10 vs brute
+</code></pre>
+<h2>Measure</h2>
+<p>Report table: ef | recall@1 | recall@10 | recall@100 | QPS | vs `M*ef_construction` constant check (`ALGO_PARAMS.md:22`).</p>
+<p>Download via `wget http://corpus-texmex.irisa.fr/.../sift.tar.gz` per `tests/cpp/download_bigann.py` logic.</p>
+<h2>Verify</h2>
+<p>On SIFT10K, target **recall@10 >0.90 at ef=50, M=16, ef_construction=200**; note QPS pure-Python will be 10-50× slower than hnswlib — acceptable.</p>
+<p>Ask teacher after first table for tuning.</p>
+<hr/>
+<p>**Links:** [Reference docs](../reference/) · [Glossary](../reference/glossary.md) · [MISSION](../MISSION.md) · Next lesson in `lessons/`</p>
+
+<nav class="nav"><a href="#">← Prev</a><a href="#">Next →</a></nav>
+<p class="meta">Print friendly · Ask your teacher for follow-ups.</p>
+</body>
+</html>
